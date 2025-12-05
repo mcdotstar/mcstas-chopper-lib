@@ -54,10 +54,12 @@ INITIALIZE %{
 
   inverse_velocity_edges[0] = minimum_inverse_velocity_edge;
   time_edges[0] = minimum_time_edge;
+  for (unsigned it=0; it<time_count; ++it){
+    time_edges[it+1] = time_edges[it] + time_bin;
+  }
   for (unsigned iv=0; iv<inverse_velocity_count; ++iv){
     inverse_velocity_edges[iv+1] = inverse_velocity_edges[iv] + inverse_velocity_bin;
     for (unsigned it=0; it<time_count; ++it){
-      time_edges[it+1] = time_edges[it] + time_bin;
       mask[iv * time_count + it] = CHOPPER_MASK_INCLUDED;
       total[iv * time_count + it] = 0;
     }
