@@ -7,7 +7,7 @@ This small library is intended to provide extra utility to McStas
 time-of-flight instruments.
 
 To start, the only utility is intended for use by spectrometers 
-which have a 'train' of choppers in their primary spectrometer to define
+which have a train of choppers in their primary spectrometer to define
 a wavelength band that can reach the sample.
 For direct-geometry spectrometers the band(s) are very sharp,
 and for indirect-geometry spectrometers the band(s) are very broad.
@@ -19,7 +19,7 @@ to only those which *could* make it to the sample position.
 The first utility performs the necessary chopper acceptance intersection
 calculations and identifies the *envelope* of possible wavelengths.
 
-Embedded in the library code is a utility which returns the *list*
+Embedded in the library code is a utility which returns the *list* of
 possible wavelength ranges.
 This list could be used as input to a new source which selects
 from multiple wavelength bands; or a semi-automatic `GROUP` of 

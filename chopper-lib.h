@@ -14,6 +14,11 @@ struct range_struct {
   double maximum;
 };
 typedef struct range_struct range;
+struct int_range_struct {
+  int minimum;
+  int maximum;
+};
+typedef struct int_range_struct int_range;
 
 /** Sort the limits of a single `range` in place
  *
@@ -83,6 +88,28 @@ struct chopper_parameters_struct {
 };
 typedef struct chopper_parameters_struct chopper_parameters;
 
+struct chopper_window_struct {
+  double min; // the minimum angle of the window in degrees
+  double max; // the maximum angle of the window in degrees
+};
+typedef struct chopper_window_struct chopper_window;
+struct multi_chopper_parameters_struct {
+  double speed; // rotation frequency in Hz
+  double phase; // t=0 orientation in degrees
+  unsigned window_count; // number of windows
+  chopper_window * windows; // array of window definitions
+  double path; // average(?) path length from source to this chopper in meters
+};
+typedef struct multi_chopper_parameters_struct multi_chopper_parameters;
+
+/** Convert single-opening chopper parameters to multi-opening chopper parameters
+ *
+ * @param single The parameters of a single-opening disk chopper
+ * @return A multi_chopper_parameters structure representing the equivalent multi-opening chopper
+ * @warning The returned structure's `windows` property is allocated in the function and must be freed at calling scope.
+ */
+multi_chopper_parameters single_to_multi_chopper(chopper_parameters single);
+
 /** Find the possible inverse velocity window(s) that are admitted by a series of disk choppers
  *
  * @param count The number of disk choppers provided
@@ -126,5 +153,79 @@ unsigned chopper_inverse_velocity_limits(double * lower, double * upper,
  */
 unsigned chopper_wavelength_limits(double * lower, double * upper, unsigned count, const chopper_parameters * choppers,
                                    double lambda_min, double lambda_max, double latest_emission);
+
+/** Create a mask of allowed (inverse_velocity, time) bins based on chopper parameters
+ *
+ * @param mask [out] An array of integers to be filled with 1 (allowed) or 0 (blocked), of size (inverse_velocity_count-1) * (time_count-1)
+ * @param mask_inverse_velocity_count [in] The number of inverse velocity bins in the mask (should be inverse_velocity_count - 1)
+ * @param mask_time_count [in] The number of time bins in the mask (should be time_count - 1)
+ * @param inverse_velocities [in] An array of inverse velocities (in s/m), of size inverse_velocity_count
+ * @param inverse_velocity_count [in] The number of inverse velocities provided
+ * @param times [in] An array of times at the source position (in s), of size time_count
+ * @param time_count [in] The number of times provided
+ * @param choppers [in] An array of chopper parameters, of size chopper_count
+ * @param chopper_count [in] The number of choppers provided
+ * @param grow_mask [in] Expand the allowed regions by this number of bins in each direction
+ * @return The number of unmasked (allowed) (inverse_velocity, time) bins
+ */
+unsigned chopper_inverse_velocity_time_mask(
+  int * mask, unsigned mask_inverse_velocity_count, unsigned mask_time_count,
+  const double * inverse_velocities, unsigned inverse_velocity_count,
+  const double * times, unsigned time_count,
+  const chopper_parameters * choppers, unsigned chopper_count,
+  int grow_mask
+  );
+
+/** Create a mask of allowed (inverse_velocity, time) bins based on multi-chopper parameters
+ *
+ * @param mask [out] An array of integers to be filled with 1 (allowed) or 0 (blocked), of size (inverse_velocity_count-1) * (time_count-1)
+ * @param mask_inverse_velocity_count [in] The number of inverse velocity bins in the mask (should be inverse_velocity_count - 1)
+ * @param mask_time_count [in] The number of time bins in the mask (should be time_count - 1)
+ * @param inverse_velocities [in] An array of inverse velocities (in s/m), of size inverse_velocity_count
+ * @param inverse_velocity_count [in] The number of inverse velocities provided
+ * @param times [in] An array of times at the source position (in s), of size time_count
+ * @param time_count [in] The number of times provided
+ * @param choppers [in] An array of multi chopper parameters, of size chopper_count
+ * @param chopper_count [in] The number of choppers provided
+ * @param grow_mask [in] Expand the allowed regions by this number of bins in each direction
+ * @return The number of unmasked (allowed) (inverse_velocity, time) bins
+ */
+unsigned multi_chopper_inverse_velocity_time_mask(
+  int * mask, unsigned mask_inverse_velocity_count, unsigned mask_time_count,
+  const double * inverse_velocities, unsigned inverse_velocity_count,
+  const double * times, unsigned time_count,
+  const multi_chopper_parameters * choppers, unsigned chopper_count,
+  int grow_mask
+  );
+
+/** \brief Calculate the relative probability in the unmasked regions of a signal
+ *
+ * @param signal The probability to consider, as a flattened 2D array of size mask_inverse_velocity_count * mask_time_count
+ * @param mask A mask of allowed (1) and disallowed (0) bins, of size mask_inverse_velocity_count * mask_time_count
+ * @param mask_inverse_velocity_count The number of inverse velocity bins in the mask
+ * @param mask_time_count The number of time bins in the mask
+ * @return The mask expectation value of the signal, i.e., the sum of the signal in allowed bins divided by the total signal
+ */
+double chopper_unmasked_probability(
+  const double * signal, const int * mask, unsigned mask_inverse_velocity_count, unsigned mask_time_count
+  );
+
+enum mask_values {
+  CHOPPER_MASK_EXCLUDED = 0,
+  CHOPPER_MASK_INCLUDED = 1,
+  CHOPPER_MASK_GROWN = 100
+};
+
+int chopper_write_mask_to_file(
+  const char * directory, const char * filename, const char * extension, const char * path_sep,
+  const int * mask, unsigned inverse_velocity_count, unsigned time_count,
+  const double * inverse_velocities, const double * times
+);
+
+int chopper_write_total_to_file(
+  const char * directory, const char * filename, const char * extension, const char * path_sep,
+  const double * total, unsigned inverse_velocity_count, unsigned time_count,
+  const double * inverse_velocities, const double * times
+);
 
 #endif //CHOPPER_LIB_CHOPPER_LIB_H

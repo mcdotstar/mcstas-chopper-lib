@@ -1,0 +1,122 @@
+DEFINE COMPONENT Masked_ESS_butterfly
+COPY ESS_butterfly
+DEFINITION PARAMETERS ()
+SETTING PARAMETERS (
+  double * choppers,
+  int chopper_count,
+  double inverse_velocity_bin,
+  double time_bin,
+  string filename=0,
+  noise_fraction=0.0
+)
+OUTPUT PARAMETERS ()
+SHARE %{
+  %include "chopper-lib"
+%}
+DECLARE %{
+  double * total;
+  int * mask;
+  double * inverse_velocity_edges;
+  double * time_edges;
+  unsigned inverse_velocity_count;
+  unsigned time_count;
+  double minimum_inverse_velocity_edge;
+  double inverse_velocity_range;
+  double minimum_time_edge;
+  double time_range;
+%}
+INITIALIZE %{
+  inverse_velocity_range = (Lmax - Lmin) * V2K / 2 / PI;
+  if (inverse_velocity_bin <= 0) inverse_velocity_bin = inverse_velocity_range;
+  inverse_velocity_count = (unsigned) ceil(inverse_velocity_range / inverse_velocity_bin);
+  inverse_velocity_edges = (double *) calloc(inverse_velocity_count + 1, sizeof(double));
+
+  time_range = tfocus_width > 0 ? tfocus_width : tmax_multiplier * ESS_SOURCE_DURATION;
+  if (time_bin <= 0) time_bin = time_range;
+  time_count = (unsigned) ceil(time_range / time_bin);
+  time_edges = (double *) calloc(time_count + 1, sizeof(double));
+
+  total = (double *) calloc(inverse_velocity_count * time_count, sizeof(double));
+  mask = (int *) calloc(inverse_velocity_count * time_count, sizeof(int));
+
+  if (!inverse_velocity_edges || !time_edges || !total || !mask){
+    fprintf(stderr, "Out of memory in %s!\n", NAME_CURRENT_COMP);
+    exit(1);
+  }
+  // Use the same minimum inverse velocity as in ESS_butterfly
+  minimum_inverse_velocity_edge = Lmin * V2K / 2 / PI;
+  // Use the same minimum time as in ESS_butterfly:
+  //    Except we don't know vz yet since we're in initialize, so instead use the
+  //    minimum possible vz to give the maximum tfocus_dist/vz, e.g., tfocus_dist*(1/vz)
+  //    -> use inverse_velocity_max = minimum_inverse_velocity_edge + inverse_velocity_range:
+  // Either all tfocus_* are non-zero or all are zero -- so this is only non-zero if they are all defined:
+  minimum_time_edge = tfocus_time - tfocus_dist * (inverse_velocity_range + minimum_inverse_velocity_edge) - tfocus_width/2.0;
+
+  inverse_velocity_edges[0] = minimum_inverse_velocity_edge;
+  time_edges[0] = minimum_time_edge;
+  for (unsigned it=0; it<time_count; ++it){
+    time_edges[it+1] = time_edges[it] + time_bin;
+  }
+  for (unsigned iv=0; iv<inverse_velocity_count; ++iv){
+    inverse_velocity_edges[iv+1] = inverse_velocity_edges[iv] + inverse_velocity_bin;
+    for (unsigned it=0; it<time_count; ++it){
+      mask[iv * time_count + it] = CHOPPER_MASK_INCLUDED;
+      total[iv * time_count + it] = 0;
+    }
+  }
+
+  chopper_parameters * chop_pars = (chopper_parameters *) choppers;
+
+  int allowed_bin_count = chopper_inverse_velocity_time_mask(
+    mask, inverse_velocity_count, time_count,
+    inverse_velocity_edges, inverse_velocity_count + 1,
+    time_edges, time_count + 1,
+    chop_pars, chopper_count,
+    1 /* grow the region by one bin in each direction */
+  );
+
+  if (allowed_bin_count < 1){
+    fprintf(stderr, "Choppers allow no transmission from %s!", NAME_CURRENT_COMP);
+    exit(1);
+  }
+
+  if (!strcmp(filename,"\0")) sprintf(filename,"%s",NAME_CURRENT_COMP);
+%}
+TRACE %{
+  // Since this is after the trace of ESS_butterfly, a neutron ray has already been selected.
+
+  // Decide which bin the generated neutron ray should go into:
+  double inv_v = 1.0 / sqrt(vx*vx + vy*vy + vz*vz);
+  unsigned inverse_velocity_index = (unsigned) floor((inv_v - minimum_inverse_velocity_edge) / inverse_velocity_bin);
+  unsigned time_index = (unsigned) floor((t - minimum_time_edge) / time_bin);
+  // Bounds check to prevent out-of-bounds array access
+  if (inverse_velocity_index >= inverse_velocity_count || time_index >= time_count) {
+    ABSORB;
+  }
+  // this indexing must match the internal working of 'chopper_inverse_velocity_time_mask'!
+  unsigned linear_index = time_index * inverse_velocity_count + inverse_velocity_index;
+
+  // Record the total probability distribution sampled
+  total[linear_index] += p;
+
+  // If it is masked-out and a random choice is above the chosen threshold, absorb the ray
+  if (mask[linear_index] == CHOPPER_MASK_EXCLUDED && rand01() > noise_fraction) {
+    ABSORB;
+  }
+  // Otherwise, let it continue on its way -- the SCATTER call was made in ESS_butterfly
+%}
+SAVE %{
+  // Now we can find the probability reduction due to our mask
+  double relative_probability = chopper_unmasked_probability(total, mask, inverse_velocity_count, time_count);
+
+  // dirname is a McCode defined static global variable, and MC_PATHSEP_S is a McCode defined macro for the path separator as a string literal
+  chopper_write_mask_to_file(dirname, filename, ".mask", MC_PATHSEP_S, mask, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
+  chopper_write_total_to_file(dirname, filename, ".total", MC_PATHSEP_S, total, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
+%}
+FINALLY %{
+  if (total) free(total);
+  if (mask) free(mask);
+  if (inverse_velocity_edges) free(inverse_velocity_edges);
+  if (time_edges) free(time_edges);
+%}
+END
