@@ -102,6 +102,12 @@ struct multi_chopper_parameters_struct {
 };
 typedef struct multi_chopper_parameters_struct multi_chopper_parameters;
 
+/** Convert single-opening chopper parameters to multi-opening chopper parameters
+ *
+ * @param single The parameters of a single-opening disk chopper
+ * @return A multi_chopper_parameters structure representing the equivalent multi-opening chopper
+ * @warning The returned structure's `windows` property is allocated in the function and must be freed at calling scope.
+ */
 multi_chopper_parameters single_to_multi_chopper(chopper_parameters single);
 
 /** Find the possible inverse velocity window(s) that are admitted by a series of disk choppers

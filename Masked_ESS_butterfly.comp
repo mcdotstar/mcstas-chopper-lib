@@ -43,7 +43,7 @@ INITIALIZE %{
     fprintf(stderr, "Out of memory in %s!\n", NAME_CURRENT_COMP);
     exit(1);
   }
-  // Use the same mimimum inverse velocity as in ESS_butterfly
+  // Use the same minimum inverse velocity as in ESS_butterfly
   minimum_inverse_velocity_edge = Lmin * V2K / 2 / PI;
   // Use the same minimum time as in ESS_butterfly:
   //    Except we don't know vz yet since we're in initialize, so instead use the
@@ -81,12 +81,16 @@ INITIALIZE %{
   if (!strcmp(filename,"\0")) sprintf(filename,"%s",NAME_CURRENT_COMP);
 %}
 TRACE %{
-  // Since this is after the trace of ESS_butteryfly, a neutron ray has already been selected.
+  // Since this is after the trace of ESS_butterfly, a neutron ray has already been selected.
 
   // Decide which bin the generated neutron ray should go into:
   double inv_v = 1.0 / sqrt(vx*vx + vy*vy + vz*vz);
   unsigned inverse_velocity_index = (unsigned) floor((inv_v - minimum_inverse_velocity_edge) / inverse_velocity_bin);
   unsigned time_index = (unsigned) floor((t - minimum_time_edge) / time_bin);
+  // Bounds check to prevent out-of-bounds array access
+  if (inverse_velocity_index >= inverse_velocity_count || time_index >= time_count) {
+    ABSORB;
+  }
   // this indexing must match the internal working of 'chopper_inverse_velocity_time_mask'!
   unsigned linear_index = time_index * inverse_velocity_count + inverse_velocity_index;
 
