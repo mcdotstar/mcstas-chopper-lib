@@ -1,4 +1,4 @@
-niess >= 0.1.1
+niess >= 0.1.2
 chopcal >= 0.4.0
 ncrystal >= 4.2.10
 gitpython
