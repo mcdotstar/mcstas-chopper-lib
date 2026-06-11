@@ -34,7 +34,11 @@ jobs:
         run: |
           Write-Host "PATH=$env:PATH"
           where.exe cl.exe
-          cl.exe /Bv
+          $probe = Join-Path $env:RUNNER_TEMP 'cl-probe.c'
+          @'
+          int main(void) { return 0; }
+          '@ | Set-Content -Path $probe -Encoding ascii
+          cl.exe /nologo /c /Bv $probe
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
