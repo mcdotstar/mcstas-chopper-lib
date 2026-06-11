@@ -32,8 +32,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Write-Host "PATH=$env:PATH"
-          where.exe cl.exe
+          $cl = (Get-Command cl.exe -ErrorAction Stop).Source
+          $link = (Get-Command link.exe -ErrorAction Stop).Source
+          $lib = (Get-Command lib.exe -ErrorAction Stop).Source
+          "CC=$cl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          "MCCODEANTLR_CC=$cl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          Write-Host "cl.exe=$cl"
+          Write-Host "link.exe=$link"
+          Write-Host "lib.exe=$lib"
+          Write-Host "INCLUDE=$env:INCLUDE"
+          Write-Host "LIB=$env:LIB"
           $probe = Join-Path $env:RUNNER_TEMP 'cl-probe.c'
           @'
           int main(void) { return 0; }
