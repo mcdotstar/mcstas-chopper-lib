@@ -1,5 +1,8 @@
 name: Test
 
+env:
+  MCCODE_VERSION: v3.5.31
+
 on:
   workflow_dispatch:
   pull_request:
@@ -11,6 +14,8 @@ jobs:
   test:
     name: Test the component(s) with Pytest
     runs-on: ${{ matrix.platform }}
+    env:
+      MCCODEANTLR_MCCODE_POOCH__TAG: ${{ env.MCCODE_VERSION }}
     strategy:
       fail-fast: false
       matrix:
