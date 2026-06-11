@@ -220,6 +220,13 @@ def test_bifrost_masked_ess_source_runs():
 
 
 def scipp_monitor_data(output, name='normalization_monitor'):
+    from mccode_antlr import version
+    from packaging.version import Version
+
+    if Version(version()) > Version('0.20.0'):
+        # the returned data is already a scipp.Dataset
+        return output[name]['I']
+    
     import scipp as sc
     dat = output[name]
     x, y, e = dat['t'], dat['I'], dat['I_err']
