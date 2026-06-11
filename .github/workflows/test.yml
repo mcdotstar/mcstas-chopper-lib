@@ -28,6 +28,14 @@ jobs:
         if: runner.os == 'Windows'
         uses: egor-tensin/vs-shell@v2
 
+      - name: Debug MSVC compiler discovery on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host "PATH=$env:PATH"
+          where.exe cl.exe
+          cl.exe /Bv
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
