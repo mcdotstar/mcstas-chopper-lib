@@ -83,7 +83,7 @@ def time_compile_and_run(instr,
         times['compile_time'] = t.interval
         # The runtime output directory used *can not* exist for McStas/McXtrace to work properly.
         # So find a name inside this directory that doesn't exist (any name should work)
-        output = inside / datetime.now().isoformat()
+        output = inside / datetime.now().strftime('%Y%m%dT%H%M%S_%f')
         with Timer('run') as t:
             result = mccode_run_compiled(binary, target, output, parameters) if run else (None, None)
         times['run_time'] = t.interval
@@ -220,6 +220,13 @@ def test_bifrost_masked_ess_source_runs():
 
 
 def scipp_monitor_data(output, name='normalization_monitor'):
+    from mccode_antlr import version
+    from packaging.version import Version
+
+    if Version(version()) > Version('0.20.0'):
+        # the returned data is already a scipp.Dataset
+        return output[name]['I']
+    
     import scipp as sc
     dat = output[name]
     x, y, e = dat['t'], dat['I'], dat['I_err']

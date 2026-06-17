@@ -11,6 +11,8 @@ jobs:
   test:
     name: Test the component(s) with Pytest
     runs-on: ${{ matrix.platform }}
+    env:
+      MCCODEANTLR_MCCODE_POOCH__TAG: v3.5.31
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +28,27 @@ jobs:
 
       - name: Setup MSVC compilers for testing on Windows
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: egor-tensin/vs-shell@v2
+
+      - name: Debug MSVC compiler discovery on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cl = (Get-Command cl.exe -ErrorAction Stop).Source
+          $link = (Get-Command link.exe -ErrorAction Stop).Source
+          $lib = (Get-Command lib.exe -ErrorAction Stop).Source
+          "CC=$cl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          "MCCODEANTLR_CC=$cl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          Write-Host "cl.exe=$cl"
+          Write-Host "link.exe=$link"
+          Write-Host "lib.exe=$lib"
+          Write-Host "INCLUDE=$env:INCLUDE"
+          Write-Host "LIB=$env:LIB"
+          $probe = Join-Path $env:RUNNER_TEMP 'cl-probe.c'
+          @'
+          int main(void) { return 0; }
+          '@ | Set-Content -Path $probe -Encoding ascii
+          cl.exe /nologo /c /Bv $probe
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt

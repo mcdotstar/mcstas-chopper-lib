@@ -522,7 +522,7 @@ FILE * chopper_open_file_for_writing(
     // need to add the extension
     sprintf(filepath + strlen(filepath), "%s", extension);
   }
-  FILE * file = fopen(filepath, "aw");
+  FILE * file = fopen(filepath, "a");
   if (file == NULL) {
     printf("Could not open file %s for writing\n", filepath);
   }
