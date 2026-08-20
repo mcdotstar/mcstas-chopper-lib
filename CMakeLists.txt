@@ -13,7 +13,11 @@ if (NOT MSVC)
   target_link_libraries(chopper_lib PUBLIC m)
 endif ()
 
-include(CTest)
-if (BUILD_TESTING)
-  add_subdirectory(test)
+# Only when this is the project being built. Consumers pull the library in with
+# FetchContent -- chopper-calculations does -- and should not inherit its test suite.
+if (PROJECT_IS_TOP_LEVEL)
+  include(CTest)
+  if (BUILD_TESTING)
+    add_subdirectory(test)
+  endif ()
 endif ()
