@@ -4,6 +4,39 @@
 // Created by Gregory Tucker, ESS ERIC on 2023-06-01.
 //
 
+/** \file
+ *
+ * \section versioning Versioning
+ *
+ * The chopper structures are handed to this library as flat `double` arrays -- see
+ * `Masked_ESS_butterfly.comp`, which casts a `double *` to `chopper_parameters *`. A
+ * change to what a field *means* therefore does not change the size or layout of
+ * anything, and a caller written against an older meaning compiles cleanly and computes
+ * the wrong answer in silence.
+ *
+ * `CHOPPER_LIB_VERSION` exists so a caller can refuse to do that. Assert on it wherever
+ * a chopper structure is populated:
+ *
+ *     #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 20000
+ *     #error "This instrument sets chopper delays; chopper-lib 2.0.0 or newer is required"
+ *     #endif
+ *
+ * The major version changes when the meaning or layout of a structure changes.
+ *
+ * 2.0.0
+ *     `chopper_parameters` and `multi_chopper_parameters` take a `delay` in seconds
+ *     where they previously took a `phase` in degrees. See the note on `delay` below.
+ * 1.0.0
+ *     Unversioned releases, taking `phase`.
+ */
+#define CHOPPER_LIB_VERSION_MAJOR 2
+#define CHOPPER_LIB_VERSION_MINOR 0
+#define CHOPPER_LIB_VERSION_PATCH 0
+/** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
+#define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
+                           + CHOPPER_LIB_VERSION_MINOR * 100 \
+                           + CHOPPER_LIB_VERSION_PATCH)
+
 /** A contiguous range characterized by two edge values
  *
  * @param minimum The lower edge of the contiguous range
@@ -72,17 +105,23 @@ range_set range_intersection(range_set ain, range_set bin);
 /** The parameters of a single-opening disk chopper.
  *
  * @param speed The rotation speed of the disk, in Hz
- * @param phase The orientation of the disk at 'zero'-time, in degrees
+ * @param delay When the centre of an opening is on the path, in seconds
  * @param angle The opening size of the disk, in degrees
  * @param path  The path length from the 'zero'-time source to the disk positon, in meters
  *
  * A multi-opening chopper could be treated as a single-opening chopper if all openings are the same size and
  * are distributed equally around the disk. In such a case the speed parameter of this structure should be the
  * 'opening appearance' frequency, so the rotation speed times the number of equally spaced openings.
+ *
+ * `delay` is unaffected by that substitution, and by the sign of `speed`: it is a time, and openings recur at
+ * `delay + n / speed` for integer `n`. This is what McStas' `DiskChopper` acts on, and what a real chopper is
+ * set with. It was a `phase` in degrees before version 2.0.0, from which this library recovered a delay by
+ * dividing by `360 * fabs(speed)` at every point of use; a delay says the same thing without needing to know
+ * the speed, and -- unlike a phase, which wraps at one revolution -- may exceed a single period.
  */
 struct chopper_parameters_struct {
   double speed; // rotation frequency in Hz
-  double phase; // t=0 orientation in degrees
+  double delay; // when an opening centre is on the path, in seconds
   double angle; // *single* window opening angle in degrees
   double path; // average(?) path length from source to this chopper in meters
 };
@@ -95,7 +134,7 @@ struct chopper_window_struct {
 typedef struct chopper_window_struct chopper_window;
 struct multi_chopper_parameters_struct {
   double speed; // rotation frequency in Hz
-  double phase; // t=0 orientation in degrees
+  double delay; // when a window centre is on the path, in seconds
   unsigned window_count; // number of windows
   chopper_window * windows; // array of window definitions
   double path; // average(?) path length from source to this chopper in meters

@@ -162,7 +162,7 @@ range_set range_intersection(const range_set ain, const range_set bin){
 /********************** local helper functions *************************/
 // void print_help(const char * program_name) {
 //   printf("Usage: %s [parameter name]=value ...\n", program_name);
-//   printf("\tValid parameter names: xxNtype for xx in (ps, fo, bw), N in (1, 2), and type in (speed, phase)\n");
+//   printf("\tValid parameter names: xxNtype for xx in (ps, fo, bw), N in (1, 2), and type in (speed, delay)\n");
 //   exit(0);
 // }
 //
@@ -189,8 +189,8 @@ range_set chopper_inverse_velocity_windows(const unsigned count, const chopper_p
     const double tau = 1.0 / fabs(choppers[i].speed);
     // the delta time of the chopper is half the time it takes to rotate through the angle of the slit
     const double dt = choppers[i].angle / 360.0 / 2.0 * tau;
-    // to match McStas DiskChopper, the delay time depends on the absolute value of the speed?
-    const double t0 = choppers[i].phase / 360.0 / fabs(choppers[i].speed);
+    // the opening is centred on the path at the delay, and every period thereafter
+    const double t0 = choppers[i].delay;
     // find the smallest n for which (t0 + dt + n * tau) / d >= inv_v_min
     const int n_min = (int) floor((choppers[i].path * inv_v_min - t0 - dt) / tau);
     // find the largest n for which (t0 - dt + n * tau) / d <= inv_v_max
@@ -268,7 +268,7 @@ multi_chopper_parameters single_to_multi_chopper(const chopper_parameters single
   chopper_window *  windows = calloc(1, sizeof(chopper_window)); // !leaked if not cleaned up externally
   windows->min = -single.angle/2.0;
   windows->max = single.angle/2.0;
-  const multi_chopper_parameters multi = {single.speed, single.phase, 1, windows, single.path};
+  const multi_chopper_parameters multi = {single.speed, single.delay, 1, windows, single.path};
   return multi;
 }
 
@@ -282,14 +282,18 @@ int_range multi_chopper_rotation_limits(const multi_chopper_parameters chopper, 
     if (chopper.windows[i].min < windows_range.minimum) windows_range.minimum = chopper.windows[i].min;
     if (chopper.windows[i].max > windows_range.maximum) windows_range.maximum = chopper.windows[i].max;
   }
-  const double t0 = chopper.phase / 360.0 / fabs(chopper.speed);
+  // The openings recur at t0 + (n + window) * tau, so the rotation index of a time t is
+  // (t - t0) / tau - window. Both terms must be in rotations: dividing the elapsed time
+  // by the period is what converts it, and the period is positive however the disk turns.
+  const double tau = 1.0 / fabs(chopper.speed);
+  const double t0 = chopper.delay;
   // Convert the windows full range from angle to fractional rotations
   windows_range.minimum = windows_range.minimum / 360.0; // rotations
   windows_range.maximum = windows_range.maximum / 360.0; // rotations
   // find the number of rotations needed to place the maximum angle _before_ the earliest time:
-  rotations.minimum = (int) floor(chopper.speed * time_range.minimum - t0 - windows_range.maximum) - 1;
+  rotations.minimum = (int) floor((time_range.minimum - t0) / tau - windows_range.maximum) - 1;
   // and the number of rotations needed to place the minimum angle _after_ the latest time:
-  rotations.maximum = (int) ceil(chopper.speed * time_range.maximum - t0 - windows_range.minimum) + 1;
+  rotations.maximum = (int) ceil((time_range.maximum - t0) / tau - windows_range.minimum) + 1;
   return rotations;
 }
 
@@ -325,7 +329,7 @@ unsigned multi_chopper_inverse_velocity_time_mask(
 
   for (unsigned ci = 0; ci < chopper_count; ++ci) {
     const double tau = 1.0 / fabs(choppers[ci].speed);
-    const double t0 = choppers[ci].phase * tau / 360.0;
+    const double t0 = choppers[ci].delay;
     const range time_range = {times[0] + choppers[ci].path * inverse_velocities[0], times[time_count - 1] + choppers[ci].path * inverse_velocities[inverse_velocity_count - 1]};
     const int_range rotations = multi_chopper_rotation_limits(choppers[ci], time_range);
     if (rotations.maximum < rotations.minimum) continue; // No possible rotations
