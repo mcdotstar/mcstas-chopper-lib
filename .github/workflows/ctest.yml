@@ -21,7 +21,7 @@ jobs:
         platform: [windows-latest, macos-latest, ubuntu-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The library ships to McStas as source and is compiled by whatever the user has,
       # so it is worth knowing it builds with MSVC as well as with gcc and clang.
@@ -42,7 +42,7 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # gcov alone would do, but gcovr turns it into a summary worth reading in a log
       # and a Cobertura file worth uploading.
@@ -57,7 +57,7 @@ jobs:
 
       - name: Upload the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: build/coverage
