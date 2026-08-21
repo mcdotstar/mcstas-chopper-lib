@@ -1,4 +1,4 @@
-niess >= 0.1.2
+niess >= 0.5.0
 chopcal >= 0.5.0  # 0.5.0 dropped Chopper.phase in favour of Chopper.delay
 ncrystal >= 4.2.10
 scipp

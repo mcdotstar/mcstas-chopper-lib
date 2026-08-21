@@ -123,19 +123,20 @@ def get_registries():
     return registries + [this_registry()]
 
 
-def bifrost_chopper_initialize(assembler, primary, need_pointer: bool = False):
-    from niess.components import DiscChopper
-    lines = []
-    for chopper in [getattr(primary, y) for y, t in primary.items() if t == DiscChopper]:
-        line = chopper.chopper_lib_parameters()
-        # No need to add delay and speed parameters since we _are_ building the full primary
-        lines.append(line)
+def bifrost_chopper_initialize(assembler):
+    from niess.chopcalc.discovery import build_train
+    train = build_train(assembler.instrument)
+    lines = ',\n'.join(
+            f'  {{{c.speed}, {c.delay}, {c.angle}, {c.path}}}'
+            f' /* {c.name}{"" if c.note is None else " -- " + c.note} */'
+            for c in train.choppers
+            )
 
     assembler.declare(dedent("""
     double * chopper_ptr;
     unsigned chopper_cnt;
     """))
-    init = "chopper_parameters pars[] = { " + ", ".join(lines) + " };" + dedent("""
+    init = "chopper_parameters pars[] = { " + lines + " };" + dedent("""
     chopper_ptr = (double *) pars;
     chopper_cnt = sizeof(pars)/sizeof(chopper_parameters);
     
@@ -180,9 +181,7 @@ def bifrost_primary(masked: bool = False):
         assembler.initialize('%include "chopper-lib"')
 
     primary.to_mccode(assembler)
-
-    bifrost_chopper_initialize(assembler, primary, need_pointer=masked)
-
+    bifrost_chopper_initialize(assembler)
     return assembler.instrument
 
 
