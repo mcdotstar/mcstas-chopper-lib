@@ -140,37 +140,48 @@ typedef struct chopper_window_struct chopper_window;
  * @param windows An array of window edge minima and maxima, relative to the zero-angle point on the disk
  * @param path  The path length from the 'zero'-time source to the disk positon, in meters
  *
- * If the relative orientation of the disk and path were important, one could also specify
- * the angle between the 0 degree reference point and path intersection with the disk.
- * This is the 'beam' angle in the NeXus NXdisk_chopper specification.
- * If you are translating from such a description to this one, the delay you must provide here
- * is larger by the ratio of the beam angle to the disk speed; e.g.:
+ * An opening edge at angle `a` degrees is on the beam at
+ *
+ *     t(a) = delay + a / (360 * speed)
+ *
+ * and every `1 / |speed|` seconds thereafter. The angular term keeps the sign of `speed`,
+ * so reversing the disk brings a window at a positive angle onto the beam *before* the
+ * zero-angle point rather than after it. Only a window symmetric about zero -- which is
+ * all `single_to_multi_chopper` produces -- is unaffected by that sign.
+ *
+ * The angle between the disk's zero-degree reference and the point where the beam crosses
+ * the disk is the 'beam' angle of the NeXus NXdisk_chopper specification. This structure
+ * has no field for it, because it is already folded into `delay`: `delay` is measured to
+ * the beam, not to whatever reference the window angles are quoted against. If you are
+ * translating from a description that separates the two, fold `beam` in yourself, either
+ * by shifting the delay:
  *
  * ```c
- *    chopper_window * windows = calloc(N, sizeof(chopper_window);
- *    windows[0].minimum = first_min;
- *    windows[0].maximum = first_max;
+ *    chopper_window * windows = calloc(N, sizeof(chopper_window));
+ *    windows[0].min = first_min;
+ *    windows[0].max = first_max;
  *    ...
- *    windows[N-1].minimum = last_min;
- *    windows[N-1].maximum = last_max;
+ *    windows[N-1].min = last_min;
+ *    windows[N-1].max = last_max;
  *
  *    multi_chopper_parameters parameters = {
  *        .speed = speed,
- *        .delay = delay + beam / speed,
+ *        .delay = delay - beam / 360.0 / speed,
  *        .window_count = N,
  *        .windows = windows,
  *        .path = path
  *    };
  * ```
  *
- * Or you could shift all window positions, e.g.:
+ * or, equivalently, by shifting every window angle:
+ *
  * ```c
- *    chopper_window * windows = calloc(N, sizeof(chopper_window);
- *    windows[0].minimum = first_min - beam;
- *    windows[0].maximum = first_max - beam;
+ *    chopper_window * windows = calloc(N, sizeof(chopper_window));
+ *    windows[0].min = first_min - beam;
+ *    windows[0].max = first_max - beam;
  *    ...
- *    windows[N-1].minimum = last_min - beam;
- *    windows[N-1].maximum = last_max - beam;
+ *    windows[N-1].min = last_min - beam;
+ *    windows[N-1].max = last_max - beam;
  *
  *    multi_chopper_parameters parameters = {
  *        .speed = speed,
@@ -180,6 +191,10 @@ typedef struct chopper_window_struct chopper_window;
  *        .path = path
  *    };
  * ```
+ *
+ * The two agree because `t(a - beam)` with the original delay is `t(a)` with the delay
+ * reduced by `beam / (360 * speed)`. Note the factor of 360: `beam` is an angle and
+ * `speed` is a frequency, so `beam / speed` alone is not a time.
  */
 struct multi_chopper_parameters_struct {
   double speed; // rotation frequency in Hz

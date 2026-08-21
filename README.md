@@ -60,3 +60,36 @@ ctest --test-dir build --output-on-failure
 
 The Python tests under `test/` are separate: they build and run whole McStas
 instruments through `niess`, and are driven by pytest.
+
+### Coverage
+
+Configure with `-DCHOPPER_LIB_COVERAGE=ON` and build the `coverage` target. It clears
+the counters left by any previous run, runs the suite, and reports which lines of
+`chopper-lib.c` the tests reached:
+
+```shell
+cmake -S . -B build-coverage -DCHOPPER_LIB_COVERAGE=ON
+cmake --build build-coverage --target coverage
+```
+
+Instrumentation needs GCC or Clang; configuring with `CHOPPER_LIB_COVERAGE=ON` under
+MSVC is an error rather than a silent no-op. The report comes from `gcovr` or `lcov` if
+either is installed -- both write a browsable `coverage/index.html`, and `gcovr` also
+writes a Cobertura `coverage.xml` for CI -- and otherwise from `gcov`, which ships with
+the compiler and gives a per-file summary plus annotated sources under `coverage/gcov`.
+
+## Describing a chopper with more than one opening
+
+`multi_chopper_parameters` is `{speed, delay, window_count, windows, path}`, where each
+of the `windows` is a pair of angles in degrees. An opening edge at angle `a` is on the
+beam at `delay + a / (360 * speed)`, and every `1 / |speed|` seconds after that.
+
+Note the sign: `speed` is signed there, and only `|speed|` sets the period. A disk
+turning backwards reaches an opening at a positive angle *before* its zero-angle point
+rather than after it, so reversing a disk reflects its openings about `delay`. This is
+invisible for an opening symmetric about zero -- which is all `single_to_multi_chopper`
+builds out of a single-opening chopper -- and matters for every other one.
+
+`multi_chopper_inverse_velocity_windows`, `multi_chopper_inverse_velocity_limits` and
+`multi_chopper_wavelength_limits` answer the same questions as their single-opening
+counterparts, which they reproduce exactly for a one-window disk.
