@@ -19,8 +19,8 @@
 #include "chopper-lib.h"
 #include "test_util.h"
 
-#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 20000
-#error "These tests describe delay-based choppers, which need chopper-lib 2.0.0 or newer"
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 30000
+#error "These tests place window angles with the signed speed, which needs chopper-lib 3.0.0 or newer"
 #endif
 
 static const double PATH = 10.0;     /* m from the source to the chopper */

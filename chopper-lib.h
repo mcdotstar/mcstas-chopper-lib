@@ -17,19 +17,26 @@
  * `CHOPPER_LIB_VERSION` exists so a caller can refuse to do that. Assert on it wherever
  * a chopper structure is populated:
  *
- *     #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 20000
- *     #error "This instrument sets chopper delays; chopper-lib 2.0.0 or newer is required"
+ *     #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 30000
+ *     #error "This instrument sets multi-opening choppers; chopper-lib 3.0.0 or newer is required"
  *     #endif
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 3.0.0
+ *     A `multi_chopper_parameters` window angle is placed with the *signed* `speed`:
+ *     an opening at angle `a` is on the beam at `delay + a / (360 * speed)`. The mask
+ *     functions previously used `fabs(speed)`, which reflects an asymmetric disk about
+ *     its `delay` when the disk turns backwards. Only a `windows` array symmetric about
+ *     zero -- all `single_to_multi_chopper` produces -- is unaffected, so a caller that
+ *     compensated for the old behaviour now has the error twice over.
  * 2.0.0
  *     `chopper_parameters` and `multi_chopper_parameters` take a `delay` in seconds
  *     where they previously took a `phase` in degrees. See the note on `delay` below.
  * 1.0.0
  *     Unversioned releases, taking `phase`.
  */
-#define CHOPPER_LIB_VERSION_MAJOR 2
+#define CHOPPER_LIB_VERSION_MAJOR 3
 #define CHOPPER_LIB_VERSION_MINOR 0
 #define CHOPPER_LIB_VERSION_PATCH 0
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */

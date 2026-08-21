@@ -93,3 +93,13 @@ builds out of a single-opening chopper -- and matters for every other one.
 `multi_chopper_inverse_velocity_windows`, `multi_chopper_inverse_velocity_limits` and
 `multi_chopper_wavelength_limits` answer the same questions as their single-opening
 counterparts, which they reproduce exactly for a one-window disk.
+
+The mask functions took the sign from `fabs(speed)` before version 3.0.0, so they
+mirrored an asymmetric disk that turns backwards. Guard against that where you fill a
+`multi_chopper_parameters` whose windows are not symmetric about zero:
+
+```c
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 30000
+#error "This instrument sets multi-opening choppers; chopper-lib 3.0.0 or newer is required"
+#endif
+```
