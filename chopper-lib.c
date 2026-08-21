@@ -228,6 +228,82 @@ range_set chopper_inverse_velocity_windows(const unsigned count, const chopper_p
   return limits;
 }
 
+range_set multi_chopper_inverse_velocity_windows(
+  const unsigned count, const multi_chopper_parameters * multi_choppers,
+  const double inv_v_min, const double inv_v_max, const double latest_emission
+  ){
+  range_set limits;
+  limits.count = 1;
+  limits.ranges = calloc(1, sizeof(range));
+  limits.ranges[0].minimum = inv_v_min;
+  limits.ranges[0].maximum = inv_v_max;
+
+  for (unsigned i=0; i<count && limits.count; ++i) if (multi_choppers[i].speed) {
+    // the period of the chopper is a positive time
+    const double tau = 1.0 / fabs(multi_choppers[i].speed);
+    // the opening is centred on the path at the delay, and every period thereafter
+    const double t0 = multi_choppers[i].delay;
+    const double path = multi_choppers[i].path;
+    // allocate open and close time arrays for the windows to avoid the same calculation twice
+    double * t_open = (double *) calloc(multi_choppers[i].window_count, sizeof(double));
+    double * t_close = (double *) calloc(multi_choppers[i].window_count, sizeof(double));
+    // find the overall minimum and maximum total rotations that cover the inverse velocity range
+    int first=1, n_min=0, n_max=0;
+    for (unsigned window=0; window<multi_choppers[i].window_count; ++window) {
+      t_open[window] = t0 + multi_choppers[i].windows[window].max / 360. / multi_choppers[i].speed;
+      t_close[window] = t0 + multi_choppers[i].windows[window].min / 360. / multi_choppers[i].speed;
+      if (t_close[window] < t_open[window]) {
+        const double tmp = t_open[window];
+        t_open[window] = t_close[window];
+        t_close[window] = tmp;
+      }
+      const int n_j_min = (int) floor((path * inv_v_min - t_open[window]) / tau);
+      const int n_j_max = (int) ceil((path * inv_v_max - t_close[window]) / tau);
+      if (first || n_j_min < n_min) n_min = n_j_min;
+      if (first || n_j_max > n_max) n_max = n_j_max;
+      if (first) first = 0;
+    }
+    // collect the ranges for each of the n in (n_min, n_max) into a set:
+    const unsigned rotation_count = (unsigned)(n_max - n_min + 1);
+    range_set ith;
+    // every rotation can contribute one range per window, so there has to be room for all of them
+    ith.count = rotation_count * multi_choppers[i].window_count;
+    ith.ranges = ith.count ? calloc(ith.count, sizeof(range)) : NULL;
+    if (ith.count && ith.ranges == NULL) {
+      printf("Out of memory\n");
+      exit(-1);
+    }
+    unsigned c=0;
+    for (unsigned j=0; j < rotation_count; ++j) {
+      const double n_tau = tau * (double) (n_min + (int) j);
+      for (unsigned window=0; window<multi_choppers[i].window_count; ++window) {
+        // let the minimum 1/v come from the *end* of the pulse:
+        double wiv_min = (t_open[window] + n_tau - latest_emission) / path;
+        double wiv_max = (t_close[window] + n_tau) / path;
+        // clamp to provided limits
+        wiv_min = wiv_min < inv_v_min ? inv_v_min : wiv_min > inv_v_max ? inv_v_max : wiv_min;
+        wiv_max = wiv_max < inv_v_min ? inv_v_min : wiv_max > inv_v_max ? inv_v_max : wiv_max;
+        // and insert if this is a valid range:
+        if (wiv_min < wiv_max) {
+          ith.ranges[c].minimum = wiv_min;
+          ith.ranges[c++].maximum = wiv_max;
+        }
+      }
+    }
+    ith.count = c;
+    // clean up allocated window opening and closing times
+    free(t_open);
+    free(t_close);
+    // find the intersection of this chopper with the running set
+    range_set new_limits = range_intersection(limits, ith);
+    // clean-up allocated memory, ensuring limits or ith is not erased if transferred to new_limits:
+    if ((!new_limits.count || new_limits.ranges != limits.ranges) && limits.ranges)  free(limits.ranges);
+    if ((!new_limits.count || new_limits.ranges != ith.ranges) && ith.ranges) free(ith.ranges);
+    // rename the new limits in preparation of returning or the next loop
+    limits = new_limits;
+  }
+  return limits;
+}
 
 unsigned chopper_inverse_velocity_limits(double * lower, double * upper,
                                          const unsigned count, const chopper_parameters * choppers,
@@ -235,6 +311,19 @@ unsigned chopper_inverse_velocity_limits(double * lower, double * upper,
                                          const double latest_emission){
   const range_set limits = chopper_inverse_velocity_windows(count, choppers, inv_v_min, inv_v_max, latest_emission);
   if (limits.count){
+    *lower = limits.ranges[0].minimum;
+    *upper = limits.ranges[limits.count-1].maximum;
+  }
+  if (limits.ranges) free(limits.ranges);
+  return limits.count;
+}
+
+unsigned multi_chopper_inverse_velocity_limits(
+  double * lower, double * upper, unsigned count, const multi_chopper_parameters * multi_choppers,
+  double inv_v_min, double inv_v_max, double latest_emission
+  ) {
+  const range_set limits = multi_chopper_inverse_velocity_windows(count, multi_choppers, inv_v_min, inv_v_max, latest_emission);
+  if (limits.count) {
     *lower = limits.ranges[0].minimum;
     *upper = limits.ranges[limits.count-1].maximum;
   }
@@ -264,36 +353,60 @@ unsigned chopper_wavelength_limits(double * lower, double * upper,
   return windows;
 }
 
+unsigned multi_chopper_wavelength_limits(
+  double * lower, double * upper, const unsigned count, const multi_chopper_parameters * multi_choppers,
+  const double lambda_min, const double lambda_max, const double latest_emission
+  ) {
+  const unsigned windows = multi_chopper_inverse_velocity_limits(
+    lower, upper, count, multi_choppers, lambda_min * V2K / 2 / PI, lambda_max * V2K / 2 / PI, latest_emission
+    );
+  if (windows) {
+    *lower *= K2V * 2 * PI;
+    *upper *= K2V * 2 * PI;
+  }
+  return windows;
+}
+
 multi_chopper_parameters single_to_multi_chopper(const chopper_parameters single) {
   chopper_window *  windows = calloc(1, sizeof(chopper_window)); // !leaked if not cleaned up externally
-  windows->min = -single.angle/2.0;
-  windows->max = single.angle/2.0;
+  windows->min = 0.0 - single.angle/2.0;
+  windows->max = 0.0 + single.angle/2.0;
   const multi_chopper_parameters multi = {single.speed, single.delay, 1, windows, single.path};
   return multi;
 }
 
-int_range multi_chopper_rotation_limits(const multi_chopper_parameters chopper, const range time_range) {
-  int_range rotations = {1, -1};
+static int_range multi_chopper_rotation_limits(const multi_chopper_parameters chopper, const range time_range) {
+  int_range rotations = {.minimum = 1, .maximum = -1};
   if (chopper.window_count < 1 || chopper.windows == NULL) {
     return rotations;
   }
-  range windows_range = {chopper.windows[0].min, chopper.windows[0].max};
+  range windows_range = {.minimum = chopper.windows[0].min, .maximum = chopper.windows[0].max};
   for (unsigned i = 1; i<chopper.window_count; ++i) {
     if (chopper.windows[i].min < windows_range.minimum) windows_range.minimum = chopper.windows[i].min;
     if (chopper.windows[i].max > windows_range.maximum) windows_range.maximum = chopper.windows[i].max;
   }
-  // The openings recur at t0 + (n + window) * tau, so the rotation index of a time t is
-  // (t - t0) / tau - window. Both terms must be in rotations: dividing the elapsed time
-  // by the period is what converts it, and the period is positive however the disk turns.
+  // An opening at angle a is on the beam at t0 + a / (360 * speed), and every period
+  // thereafter, so the rotation index of a time t is (t - t0) / tau - a / (360 * speed) / tau.
+  // Both terms must be in rotations: dividing the elapsed time by the period is what
+  // converts it, and the period is positive however the disk turns. The angular term keeps
+  // the sign of the speed, because a disk turning the other way brings the same angle onto
+  // the beam before the zero-angle point rather than after it.
   const double tau = 1.0 / fabs(chopper.speed);
   const double t0 = chopper.delay;
-  // Convert the windows full range from angle to fractional rotations
-  windows_range.minimum = windows_range.minimum / 360.0; // rotations
-  windows_range.maximum = windows_range.maximum / 360.0; // rotations
-  // find the number of rotations needed to place the maximum angle _before_ the earliest time:
-  rotations.minimum = (int) floor((time_range.minimum - t0) / tau - windows_range.maximum) - 1;
-  // and the number of rotations needed to place the minimum angle _after_ the latest time:
-  rotations.maximum = (int) ceil((time_range.maximum - t0) / tau - windows_range.minimum) + 1;
+  const double turn = chopper.speed < 0 ? -1.0 : 1.0;
+  // Convert the windows full range from angle to fractional rotations, keeping the pair
+  // ordered: reversing the disk exchanges which edge is the earlier one.
+  double lowest = turn * windows_range.minimum / 360.0;  // rotations
+  double highest = turn * windows_range.maximum / 360.0; // rotations
+  if (lowest > highest) {
+    const double tmp = lowest;
+    lowest = highest;
+    highest = tmp;
+  }
+  // find the number of rotations needed to place the latest angle _before_ the earliest time:
+  rotations.minimum = (int) floor((time_range.minimum - t0) / tau - highest) - 1;
+  // and the number of rotations needed to place the earliest angle _after_ the latest time:
+  rotations.maximum = (int) ceil((time_range.maximum - t0) / tau - lowest) + 1;
   return rotations;
 }
 
@@ -328,9 +441,22 @@ unsigned multi_chopper_inverse_velocity_time_mask(
   for (unsigned i = 0; i < time_edges_count; ++i) time_edges[i] = 1;
 
   for (unsigned ci = 0; ci < chopper_count; ++ci) {
+    // A stationary disk has no period to speak of; the window functions skip it rather
+    // than dividing by zero, so do the same here.
+    if (choppers[ci].speed == 0.0) continue;
+    // A disk with no openings is a beam stop rather than an absent chopper, which is what
+    // the window functions report for the same chopper: their range set comes back empty.
+    if (choppers[ci].window_count < 1 || choppers[ci].windows == NULL) {
+      memset(inverse_velocity_edges, 0, inverse_velocity_edges_count * sizeof(int));
+      memset(time_edges, 0, time_edges_count * sizeof(int));
+      break; // nothing any other chopper does can let a neutron back through
+    }
     const double tau = 1.0 / fabs(choppers[ci].speed);
     const double t0 = choppers[ci].delay;
-    const range time_range = {times[0] + choppers[ci].path * inverse_velocities[0], times[time_count - 1] + choppers[ci].path * inverse_velocities[inverse_velocity_count - 1]};
+    const range time_range = {
+      .minimum = times[0] + choppers[ci].path * inverse_velocities[0],
+      .maximum = times[time_count - 1] + choppers[ci].path * inverse_velocities[inverse_velocity_count - 1]
+    };
     const int_range rotations = multi_chopper_rotation_limits(choppers[ci], time_range);
     if (rotations.maximum < rotations.minimum) continue; // No possible rotations
     // build the ranges of allowed times for this chopper
@@ -340,8 +466,12 @@ unsigned multi_chopper_inverse_velocity_time_mask(
     unsigned c = 0;
     for (int n = rotations.minimum; n <= rotations.maximum; ++n) {
       for (unsigned w = 0; w < choppers[ci].window_count; ++w) {
-        allowed_times.ranges[c].minimum = t0 + ((double) n + choppers[ci].windows[w].min / 360.0) * tau;
-        allowed_times.ranges[c++].maximum = t0 + ((double) n + choppers[ci].windows[w].max / 360.0) * tau;
+        // Which window edge reaches the beam first depends on which way the disk turns,
+        // so place both with the signed speed and order the pair afterwards.
+        const double a = t0 + (double) n * tau + choppers[ci].windows[w].min / 360.0 / choppers[ci].speed;
+        const double b = t0 + (double) n * tau + choppers[ci].windows[w].max / 360.0 / choppers[ci].speed;
+        allowed_times.ranges[c].minimum = a < b ? a : b;
+        allowed_times.ranges[c++].maximum = a < b ? b : a;
       }
     }
     // Now check each bin edge against the allowed times
@@ -349,8 +479,8 @@ unsigned multi_chopper_inverse_velocity_time_mask(
       for (unsigned vi = 0; vi < mask_inverse_velocity_count; ++ vi) {
         if (time_edges[ti * mask_inverse_velocity_count + vi] == 1) {
           const range edge= {
-            times[ti] + choppers[ci].path * inverse_velocities[vi],
-            times[ti] + choppers[ci].path * inverse_velocities[vi + 1]
+            .minimum = times[ti] + choppers[ci].path * inverse_velocities[vi],
+            .maximum = times[ti] + choppers[ci].path * inverse_velocities[vi + 1]
           };
           if (range_intersects_ranges(edge, allowed_times) == 0) {
             time_edges[ti * mask_inverse_velocity_count + vi] = 0;
@@ -362,8 +492,8 @@ unsigned multi_chopper_inverse_velocity_time_mask(
       for (unsigned ti = 0; ti < mask_time_count; ++ti) {
         if (inverse_velocity_edges[vi * mask_time_count + ti] == 1) {
           const range edge = {
-            times[ti] + choppers[ci].path * inverse_velocities[vi],
-            times[ti + 1] + choppers[ci].path * inverse_velocities[vi]
+            .minimum = times[ti] + choppers[ci].path * inverse_velocities[vi],
+            .maximum = times[ti + 1] + choppers[ci].path * inverse_velocities[vi]
           };
           if (range_intersects_ranges(edge, allowed_times) == 0) {
             inverse_velocity_edges[vi * mask_time_count + ti] = 0;

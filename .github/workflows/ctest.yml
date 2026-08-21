@@ -21,7 +21,7 @@ jobs:
         platform: [windows-latest, macos-latest, ubuntu-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The library ships to McStas as source and is compiled by whatever the user has,
       # so it is worth knowing it builds with MSVC as well as with gcc and clang.
@@ -37,3 +37,27 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --build-config Release --output-on-failure
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # gcov alone would do, but gcovr turns it into a summary worth reading in a log
+      # and a Cobertura file worth uploading.
+      - name: Install gcovr
+        run: python -m pip install --upgrade pip gcovr
+
+      - name: Configure
+        run: cmake -S . -B build -DCHOPPER_LIB_COVERAGE=ON
+
+      - name: Run the tests and report coverage
+        run: cmake --build build --target coverage
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: build/coverage

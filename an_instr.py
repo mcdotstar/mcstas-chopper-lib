@@ -211,7 +211,7 @@ def insert_source(assembler, source_name):
     for x in [y for y, t in primary.items() if t == DiscChopper]:
         comp = getattr(primary, x)
         line = comp.chopper_lib_parameters()
-        # hack since we're not building the full instrument, but need the phases and speeds as parameters:
+        # hack since we're not building the full instrument, but need the delays and speeds as parameters:
         names = [x.strip() for x in line[1:-1].split(',')]
         for name in names:
             try:
@@ -246,7 +246,7 @@ def insert_source(assembler, source_name):
         if (windows == 0){
          printf("Chopper train will not pass wavelengths between %f and %f angstrom\\n", 
                 lambda_0, lambda_1);
-         printf("Examine the provided chopper speeds and phases.\\n");
+         printf("Examine the provided chopper speeds and delays.\\n");
         }
         if (windows > 1){
          printf("Chopper train will pass %u wavelength ranges between %f and %f angstrom\\n", 
@@ -304,7 +304,9 @@ def bifrost_chopper_params(e_max, t_psc):
         'bw2': 'bandwidth_chopper_2',
     }
     pars = bifrost(e_max, 0, t_psc)
-    vals = [f'{v}{y}={getattr(pars[x],y)}' for x, v in names.items() for y in ('phase', 'speed')]
+    # chopcal dropped Chopper.phase in 0.5.0; a delay in seconds is what both it and the
+    # instrument deal in now, and `<name>delay` is what niess declares the knob as.
+    vals = [f'{v}{y}={getattr(pars[x],y)}' for x, v in names.items() for y in ('delay', 'speed')]
     return ' '.join(vals)
 
 

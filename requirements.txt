@@ -1,5 +1,5 @@
-niess >= 0.1.2
-chopcal >= 0.4.0
+git+https://github.com/mcdotstar/niess.git@c50063d21270784ea633d343825a1ece7775e4db
+chopcal >= 0.5.0  # 0.5.0 dropped Chopper.phase in favour of Chopper.delay
 ncrystal >= 4.2.10
 scipp
 gitpython

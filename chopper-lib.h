@@ -17,19 +17,26 @@
  * `CHOPPER_LIB_VERSION` exists so a caller can refuse to do that. Assert on it wherever
  * a chopper structure is populated:
  *
- *     #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 20000
- *     #error "This instrument sets chopper delays; chopper-lib 2.0.0 or newer is required"
+ *     #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 30000
+ *     #error "This instrument sets multi-opening choppers; chopper-lib 3.0.0 or newer is required"
  *     #endif
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 3.0.0
+ *     A `multi_chopper_parameters` window angle is placed with the *signed* `speed`:
+ *     an opening at angle `a` is on the beam at `delay + a / (360 * speed)`. The mask
+ *     functions previously used `fabs(speed)`, which reflects an asymmetric disk about
+ *     its `delay` when the disk turns backwards. Only a `windows` array symmetric about
+ *     zero -- all `single_to_multi_chopper` produces -- is unaffected, so a caller that
+ *     compensated for the old behaviour now has the error twice over.
  * 2.0.0
  *     `chopper_parameters` and `multi_chopper_parameters` take a `delay` in seconds
  *     where they previously took a `phase` in degrees. See the note on `delay` below.
  * 1.0.0
  *     Unversioned releases, taking `phase`.
  */
-#define CHOPPER_LIB_VERSION_MAJOR 2
+#define CHOPPER_LIB_VERSION_MAJOR 3
 #define CHOPPER_LIB_VERSION_MINOR 0
 #define CHOPPER_LIB_VERSION_PATCH 0
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
@@ -128,13 +135,77 @@ struct chopper_parameters_struct {
 typedef struct chopper_parameters_struct chopper_parameters;
 
 struct chopper_window_struct {
-  double min; // the minimum angle of the window in degrees
-  double max; // the maximum angle of the window in degrees
+  double min; // the minimum angle of the window in degrees with respect to the beam
+  double max; // the maximum angle of the window in degrees with respect to the beam
 };
 typedef struct chopper_window_struct chopper_window;
+
+/** The parameters of a multi-opening disk chopper
+ * @param speed The rotation speed of the disk, in Hz
+ * @param delay When the zero-angle point of the disk is on the path, in seconds
+ * @param window_count The number of openings in the disk
+ * @param windows An array of window edge minima and maxima, relative to the zero-angle point on the disk
+ * @param path  The path length from the 'zero'-time source to the disk positon, in meters
+ *
+ * An opening edge at angle `a` degrees is on the beam at
+ *
+ *     t(a) = delay + a / (360 * speed)
+ *
+ * and every `1 / |speed|` seconds thereafter. The angular term keeps the sign of `speed`,
+ * so reversing the disk brings a window at a positive angle onto the beam *before* the
+ * zero-angle point rather than after it. Only a window symmetric about zero -- which is
+ * all `single_to_multi_chopper` produces -- is unaffected by that sign.
+ *
+ * The angle between the disk's zero-degree reference and the point where the beam crosses
+ * the disk is the 'beam' angle of the NeXus NXdisk_chopper specification. This structure
+ * has no field for it, because it is already folded into `delay`: `delay` is measured to
+ * the beam, not to whatever reference the window angles are quoted against. If you are
+ * translating from a description that separates the two, fold `beam` in yourself, either
+ * by shifting the delay:
+ *
+ * ```c
+ *    chopper_window * windows = calloc(N, sizeof(chopper_window));
+ *    windows[0].min = first_min;
+ *    windows[0].max = first_max;
+ *    ...
+ *    windows[N-1].min = last_min;
+ *    windows[N-1].max = last_max;
+ *
+ *    multi_chopper_parameters parameters = {
+ *        .speed = speed,
+ *        .delay = delay - beam / 360.0 / speed,
+ *        .window_count = N,
+ *        .windows = windows,
+ *        .path = path
+ *    };
+ * ```
+ *
+ * or, equivalently, by shifting every window angle:
+ *
+ * ```c
+ *    chopper_window * windows = calloc(N, sizeof(chopper_window));
+ *    windows[0].min = first_min - beam;
+ *    windows[0].max = first_max - beam;
+ *    ...
+ *    windows[N-1].min = last_min - beam;
+ *    windows[N-1].max = last_max - beam;
+ *
+ *    multi_chopper_parameters parameters = {
+ *        .speed = speed,
+ *        .delay = delay,
+ *        .window_count = N,
+ *        .windows = windows,
+ *        .path = path
+ *    };
+ * ```
+ *
+ * The two agree because `t(a - beam)` with the original delay is `t(a)` with the delay
+ * reduced by `beam / (360 * speed)`. Note the factor of 360: `beam` is an angle and
+ * `speed` is a frequency, so `beam / speed` alone is not a time.
+ */
 struct multi_chopper_parameters_struct {
   double speed; // rotation frequency in Hz
-  double delay; // when a window centre is on the path, in seconds
+  double delay; // when the 0-angle point of the disk is at the beam center, in seconds
   unsigned window_count; // number of windows
   chopper_window * windows; // array of window definitions
   double path; // average(?) path length from source to this chopper in meters
@@ -162,6 +233,19 @@ multi_chopper_parameters single_to_multi_chopper(chopper_parameters single);
 range_set chopper_inverse_velocity_windows(unsigned count, const chopper_parameters * choppers,
                                            double inv_v_min, double inv_v_max, double latest_emission);
 
+/** Find the possible inverse velocity window(s) that are admitted by a series of disk choppers
+ *
+ * @param count The number of disk choppers provided
+ * @param multi_choppers The parameters of the disk choppers
+ * @param inv_v_min The minimum inverse velocity to be considered -- likely matching a guide cutoff
+ * @param inv_v_max The maximum inverse velocity to be considered -- how long before a neutron is no-longer interesting
+ * @param latest_emission How long after time-zero can a neutron start its journey, effects minimum inverse velocities
+ * @return One or more inverse velocity ranges that can pass through the chopper train as a `range_set`
+ * @warning The returned value's `ranges` property is allocated in the function and must be freed at calling scope.
+ */
+range_set multi_chopper_inverse_velocity_windows(unsigned count, const multi_chopper_parameters * multi_choppers,
+                                           double inv_v_min, double inv_v_max, double latest_emission);
+
 /** Find the enveloping limits of the possible inverse velocity window(s) that are admitted by a chopper train
  *
  * @param lower Output lower inverse velocity limit, only set if the return value is finite
@@ -178,6 +262,24 @@ unsigned chopper_inverse_velocity_limits(double * lower, double * upper,
                                          unsigned count, const chopper_parameters * choppers,
                                          double inv_v_min, double inv_v_max, double latest_emission);
 
+/** Find the enveloping limits of the possible inverse velocity window(s) that are admitted by a chopper train which
+ * may contain any number of choppers with multiple openings
+ *
+ * @param lower Output lower inverse velocity limit, only set if the return value is finite
+ * @param upper Output upper inverse velocity limit, only set if the return value is finite
+ * @param count The number of choppers in the train
+ * @param multi_choppers Parameters for each chopper
+ * @param inv_v_min The minimum inverse velocity to be considered
+ * @param inv_v_max The maximum inverse velocity to be considered
+ * @param latest_emission How long after time-zero a neutron can start along the flight path
+ * @return The number of inverse velocity windows admitted by the choppers, if greater than one the lower and upper
+ *         values include in their range inverse velocities which are not passed by the chopper train.
+ */
+unsigned multi_chopper_inverse_velocity_limits(
+  double * lower, double * upper, unsigned count, const multi_chopper_parameters * multi_choppers,
+  double inv_v_min, double inv_v_max, double latest_emission
+  );
+
 /** Find the enveloping limits of the possible wavelength window(s) that are admitted by a chopper train
  *
  * @param lower Output lower wavelength limit, only set if the return value is finite
@@ -192,6 +294,24 @@ unsigned chopper_inverse_velocity_limits(double * lower, double * upper,
  */
 unsigned chopper_wavelength_limits(double * lower, double * upper, unsigned count, const chopper_parameters * choppers,
                                    double lambda_min, double lambda_max, double latest_emission);
+
+/** Find the enveloping limits of the possible wavelength window(s) that are admitted by a chopper train which may
+ *  contain choppers with multiple openings
+ *
+ * @param lower Output lower wavelength limit, only set if the return value is finite
+ * @param upper Output upper wavelength limit, only set if the return value is finite
+ * @param count The number of choppers in the train
+ * @param multi_choppers Parameters for each chopper
+ * @param lambda_min The minimum wavelength to be considered
+ * @param lambda_max The maximum inverse velocity to be considered
+ * @param latest_emission How long after time-zero a neutron can start along the flight path
+ * @return The number of windows admitted by the choppers, if greater than one the lower and upper
+ *         values include in their range wavelengths which are not passed by the chopper train.
+ */
+unsigned multi_chopper_wavelength_limits(
+  double * lower, double * upper, unsigned count, const multi_chopper_parameters * multi_choppers,
+  double lambda_min, double lambda_max, double latest_emission
+  );
 
 /** Create a mask of allowed (inverse_velocity, time) bins based on chopper parameters
  *
