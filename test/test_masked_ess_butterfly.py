@@ -128,7 +128,7 @@ def bifrost_chopper_initialize(assembler, primary, need_pointer: bool = False):
     lines = []
     for chopper in [getattr(primary, y) for y, t in primary.items() if t == DiscChopper]:
         line = chopper.chopper_lib_parameters()
-        # No need to add phase and speed parameters since we _are_ building the full primary
+        # No need to add delay and speed parameters since we _are_ building the full primary
         lines.append(line)
 
     assembler.declare(dedent("""
@@ -148,7 +148,7 @@ def bifrost_chopper_initialize(assembler, primary, need_pointer: bool = False):
     );
     if (windows == 0){
      printf("Chopper train will not pass wavelengths between %f and %f angstrom\\n", lambda_0, lambda_1);
-     printf("Examine the provided chopper speeds and phases.\\n");
+     printf("Examine the provided chopper speeds and delays.\\n");
     }
     if (windows > 1){
      printf("Chopper train will pass %u wavelength ranges between %f and %f angstrom\\n", windows, lambda_0, lambda_1);
@@ -197,7 +197,9 @@ def bifrost_chopper_params(e_max, t_psc):
         'bw2': 'bandwidth_chopper_2',
     }
     pars = bifrost(e_max, 0, t_psc)
-    vals = [f'{v}{y}={getattr(pars[x],y)}' for x, v in names.items() for y in ('phase', 'speed')]
+    # chopcal dropped Chopper.phase in 0.5.0; a delay in seconds is what both it and the
+    # instrument deal in now, and `<name>delay` is what niess declares the knob as.
+    vals = [f'{v}{y}={getattr(pars[x],y)}' for x, v in names.items() for y in ('delay', 'speed')]
     return ' '.join(vals)
 
 
