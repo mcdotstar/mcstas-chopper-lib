@@ -9,12 +9,18 @@
 #include "chopper-lib.h"
 #include "test_util.h"
 
-#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 20000
-#error "These tests describe delay-based choppers, which need chopper-lib 2.0.0 or newer"
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
+#error "These tests describe disks by a flat edge array, which needs chopper-lib 4.0.0 or newer"
 #endif
 
 static const double PATH = 10.0;    /* m from the source to the chopper */
-static const double ANGLE = 3.6;    /* deg, a hundredth of a revolution */
+#define ANGLE 3.6                   /* deg, a hundredth of a revolution */
+
+/* Every chopper here is the simplest disk there is: one opening, `ANGLE` wide, centred
+ * on the mark that `delay` names. Written as edges that is the pair below, which every
+ * test shares because none of them varies the disk itself -- only its speed, its delay
+ * and how far away it sits. */
+static double OPENING[2] = {-ANGLE / 2.0, ANGLE / 2.0};
 
 /* Where the mask puts its allowed bins, as a mean inverse velocity, or -1 if none. */
 static double allowed_centroid(const int * mask, unsigned iv_bins, unsigned t_bins,
@@ -56,7 +62,7 @@ static void test_the_delay_names_the_same_window_at_any_speed(void) {
   const double speeds[2] = {14.0, 28.0};
 
   for (int i = 0; i < 2; ++i) {
-    const chopper_parameters chopper = {speeds[i], delay, ANGLE, PATH};
+    const chopper_parameters chopper = {speeds[i], delay, 0.0, 2, OPENING, PATH};
     range_set windows = chopper_inverse_velocity_windows(1, &chopper, 0.0005, 0.01, 0.0);
 
     /* the n=0 opening is centred on delay, so at delay/path in inverse velocity */
@@ -92,7 +98,7 @@ static void test_a_delay_beyond_one_period_is_honoured(void) {
   const unsigned iv_bins = 1000;
   double * iv_edges = calloc(iv_bins + 1, sizeof(double));
   int * mask = calloc(iv_bins, sizeof(int));
-  const chopper_parameters chopper = {speed, delay, ANGLE, PATH};
+  const chopper_parameters chopper = {speed, delay, 0.0, 2, OPENING, PATH};
   const unsigned allowed = mask_one_chopper(chopper, mask, iv_edges, iv_bins);
 
   /* Openings recur at delay + n/speed. Within an arrival time of 0.1 s only n = -3
@@ -124,8 +130,8 @@ static void test_a_counter_rotating_disk_blocks_the_same_neutrons(void) {
   int * forward = calloc(iv_bins, sizeof(int));
   int * reverse = calloc(iv_bins, sizeof(int));
 
-  const chopper_parameters cw  = {14.0, 0.02, ANGLE, PATH};
-  const chopper_parameters ccw = {-14.0, 0.02, ANGLE, PATH};
+  const chopper_parameters cw  = {14.0, 0.02, 0.0, 2, OPENING, PATH};
+  const chopper_parameters ccw = {-14.0, 0.02, 0.0, 2, OPENING, PATH};
   const unsigned forward_allowed = mask_one_chopper(cw, forward, forward_edges, iv_bins);
   const unsigned reverse_allowed = mask_one_chopper(ccw, reverse, reverse_edges, iv_bins);
 
@@ -148,8 +154,8 @@ static void test_a_counter_rotating_disk_blocks_the_same_neutrons(void) {
 static void test_two_choppers_admit_only_their_overlap(void) {
   TEST("a chopper train admits only what all of its choppers admit");
   const chopper_parameters choppers[2] = {
-    {14.0, 0.02, ANGLE, PATH},
-    {14.0, 0.02, ANGLE, 2.0 * PATH},   /* twice as far, so half the inverse velocity */
+    {14.0, 0.02, 0.0, 2, OPENING, PATH},
+    {14.0, 0.02, 0.0, 2, OPENING, 2.0 * PATH},   /* twice as far, so half the inverse velocity */
   };
 
   double lower = 0.0, upper = 0.0;
@@ -167,8 +173,8 @@ static void test_a_train_passes_a_coincident_opening(void) {
   TEST("a chopper train passes the openings its choppers share");
   const double tau = 1.0 / 14.0;
   const chopper_parameters choppers[2] = {
-    {14.0, 0.02, ANGLE, PATH},
-    {14.0, 0.04, ANGLE, 2.0 * PATH},   /* twice as far, twice the delay: same 1/v */
+    {14.0, 0.02, 0.0, 2, OPENING, PATH},
+    {14.0, 0.04, 0.0, 2, OPENING, 2.0 * PATH},   /* twice as far, twice the delay: same 1/v */
   };
 
   range_set windows = chopper_inverse_velocity_windows(2, choppers, 0.0005, 0.01, 0.0);
@@ -201,8 +207,8 @@ static void test_the_reported_limits_envelope_the_windows(void) {
   TEST("reported limits envelope every window a train passes");
   const double tau = 1.0 / 14.0;
   const chopper_parameters choppers[2] = {
-    {14.0, 0.02, ANGLE, PATH},
-    {14.0, 0.04, ANGLE, 2.0 * PATH},
+    {14.0, 0.02, 0.0, 2, OPENING, PATH},
+    {14.0, 0.04, 0.0, 2, OPENING, 2.0 * PATH},
   };
   const double narrower_half = ANGLE / 360.0 / 2.0 / 14.0 / (2.0 * PATH);
 

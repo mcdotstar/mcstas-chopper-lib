@@ -1,3 +1,21 @@
+/*******************************************************************************
+* Component: Masked_ESS_butterfly
+*
+* An ESS_butterfly source that emits only where a chopper train lets neutrons through.
+*
+* `choppers` is a `chopper_parameters` array reinterpreted as `double *`, which is the
+* only pointer a McStas SETTING PARAMETER can carry. It was four doubles per chopper
+* before chopper-lib 4.0.0 and is a structure holding a pointer now, so an instrument
+* that really did hand over a flat array of numbers must build the structures instead:
+*
+*   double edges[] = {-1.8, 1.8};
+*   chopper_parameters pars[] = {{14.0, 0.02, 0.0, 2, edges, 10.0}};
+*   chopper_ptr = (double *) pars;
+*   chopper_cnt = sizeof(pars) / sizeof(chopper_parameters);
+*
+* `edges` is a flat, increasing list of angles in degrees, two per opening, in the disk's
+* own frame; `beam` is the angle on the beam path at `delay`. See the chopper-lib README.
+*******************************************************************************/
 DEFINE COMPONENT Masked_ESS_butterfly
 COPY ESS_butterfly
 DEFINITION PARAMETERS ()
@@ -12,6 +30,10 @@ SETTING PARAMETERS (
 OUTPUT PARAMETERS ()
 SHARE %{
   %include "chopper-lib"
+
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
+#error "Masked_ESS_butterfly describes choppers by edges; chopper-lib 4.0.0 or newer is required"
+#endif
 %}
 DECLARE %{
   double * total;
@@ -66,6 +88,20 @@ INITIALIZE %{
   }
 
   chopper_parameters * chop_pars = (chopper_parameters *) choppers;
+
+  /* A caller still filling the pre-4.0.0 layout positionally compiles clean and lands a
+   * flight path in `edge_count` and rubbish in `edges`, so check before dereferencing it:
+   * a disk described by fewer than two edges is not a disk. */
+  for (int ci = 0; ci < chopper_count; ++ci) {
+    if (chop_pars[ci].edge_count < 2 || chop_pars[ci].edge_count % 2
+        || chop_pars[ci].edges == NULL) {
+      fprintf(stderr, "%s: chopper %d has %u edges at %p; each opening needs two, and "
+                      "chopper-lib 4.0.0 takes {speed, delay, beam, edge_count, edges, "
+                      "path}\n",
+              NAME_CURRENT_COMP, ci, chop_pars[ci].edge_count, (void *) chop_pars[ci].edges);
+      exit(1);
+    }
+  }
 
   int allowed_bin_count = chopper_inverse_velocity_time_mask(
     mask, inverse_velocity_count, time_count,

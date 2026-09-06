@@ -78,28 +78,47 @@ either is installed -- both write a browsable `coverage/index.html`, and `gcovr`
 writes a Cobertura `coverage.xml` for CI -- and otherwise from `gcov`, which ships with
 the compiler and gives a per-file summary plus annotated sources under `coverage/gcov`.
 
-## Describing a chopper with more than one opening
+## Describing a chopper
 
-`multi_chopper_parameters` is `{speed, delay, window_count, windows, path}`, where each
-of the `windows` is a pair of angles in degrees. An opening edge at angle `a` is on the
-beam at `delay + a / (360 * speed)`, and every `1 / |speed|` seconds after that.
+`chopper_parameters` is `{speed, delay, beam, edge_count, edges, path}`, and describes a
+disk the way the NeXus `NXdisk_chopper` standard and the `CollectorDiskChopper` McStas
+component do: `edges` is a flat, increasing list of angles in degrees measured from the
+disk's own zero mark, two per opening, and `beam` is the angle of the mark that is on the
+beam path at `delay`. An edge at angle `a` is on the beam path at
 
-Note the sign: `speed` is signed there, and only `|speed|` sets the period. A disk
-turning backwards reaches an opening at a positive angle *before* its zero-angle point
-rather than after it, so reversing a disk reflects its openings about `delay`. This is
-invisible for an opening symmetric about zero -- which is all `single_to_multi_chopper`
-builds out of a single-opening chopper -- and matters for every other one.
+```
+t(a) = delay + (beam - a) / (360 * speed)
+```
 
-`multi_chopper_inverse_velocity_windows`, `multi_chopper_inverse_velocity_limits` and
-`multi_chopper_wavelength_limits` answer the same questions as their single-opening
-counterparts, which they reproduce exactly for a one-window disk.
+and every `1 / |speed|` seconds after that. Because only `beam - a` appears, a caller can
+hand over the disk's own numbers unchanged: the openings in the frame the disk is drawn
+in, and separately where the beam crosses it. There is no conversion to do.
 
-The mask functions took the sign from `fabs(speed)` before version 3.0.0, so they
-mirrored an asymmetric disk that turns backwards. Guard against that where you fill a
-`multi_chopper_parameters` whose windows are not symmetric about zero:
+A single-opening chopper of width `w` centred on the mark is `edges = {-w/2, +w/2}` --
+negative angles are allowed here, unlike in a NeXus file, because the component allows
+them and this library describes the same disk the component does.
+
+Note the sign: `speed` is signed, and only `|speed|` sets the period. A larger angle
+reaches the beam *earlier* on a disk turning forwards, so reversing a disk reflects its
+openings about `delay`. This is invisible for an opening symmetric about the mark and
+matters for every other one.
+
+`chopper_inverse_velocity_windows` lists the openings a train passes;
+`chopper_inverse_velocity_limits` and `chopper_wavelength_limits` report the envelope of
+that list, with a count so a caller can tell an envelope spanning gaps from a single
+window; `chopper_inverse_velocity_time_mask` answers the same question against a
+histogram grid.
+
+Version 4.0.0 replaced the `{speed, delay, angle, path}` and
+`{speed, delay, window_count, windows, path}` pair of structures with the single one
+above, and reversed the sign of the angle term. The field names changed with it, so a
+caller written against an older version fails to compile rather than silently placing
+every opening on the wrong side of `delay` -- but a caller that fills the structure
+positionally does not, and the mask functions took the sign from `fabs(speed)` before
+version 3.0.0 besides. Guard where you fill a `chopper_parameters`:
 
 ```c
-#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 30000
-#error "This instrument sets multi-opening choppers; chopper-lib 3.0.0 or newer is required"
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
+#error "This instrument describes choppers by edges; chopper-lib 4.0.0 or newer is required"
 #endif
 ```
