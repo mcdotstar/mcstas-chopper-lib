@@ -28,14 +28,14 @@ SETTING PARAMETERS (
   noise_fraction=0.0
 )
 OUTPUT PARAMETERS ()
-SHARE %{
+SHARE INHERIT ESS_butterfly EXTEND %{
   %include "chopper-lib"
 
 #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
 #error "Masked_ESS_butterfly describes choppers by edges; chopper-lib 4.0.0 or newer is required"
 #endif
 %}
-DECLARE %{
+DECLARE INHERIT ESS_butterfly EXTEND %{
   double * total;
   int * mask;
   double * inverse_velocity_edges;
@@ -47,7 +47,7 @@ DECLARE %{
   double minimum_time_edge;
   double time_range;
 %}
-INITIALIZE %{
+INITIALIZE INHERIT ESS_butterfly EXTEND %{
   inverse_velocity_range = (Lmax - Lmin) * V2K / 2 / PI;
   if (inverse_velocity_bin <= 0) inverse_velocity_bin = inverse_velocity_range;
   inverse_velocity_count = (unsigned) ceil(inverse_velocity_range / inverse_velocity_bin);
@@ -118,7 +118,7 @@ INITIALIZE %{
 
   if (!strcmp(filename,"\0")) sprintf(filename,"%s",NAME_CURRENT_COMP);
 %}
-TRACE %{
+TRACE INHERIT ESS_butterfly EXTEND %{
   // Since this is after the trace of ESS_butterfly, a neutron ray has already been selected.
 
   // Decide which bin the generated neutron ray should go into:
