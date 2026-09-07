@@ -7,7 +7,7 @@
 * Date: 2026
 * Origin: European Spallation Source ERIC
 *
-* A disc chopper with arbitrary openings, 
+* A disc chopper with arbitrary openings,
 *
 * %D
 * One component per physical disc, however many openings it has.
@@ -15,7 +15,7 @@
 * `DiskChopper` describes `nslit` *identical, evenly spaced* openings
 * so a chopper whose openings are neither identical nor evenly spaced
 * has to be emitted as a GROUP of several components.
-* This component takes the edges directly, so one disc is one component 
+* This component takes the edges directly, so one disc is one component
 * and corresponds to one NeXus group.
 *
 * It also stops. `DiskChopper` replaces a zero frequency with `omega = 1e-15`,
@@ -71,7 +71,7 @@ park_angle = 0,
 beam_angle = 0,
 zero_angle = 0,
 jitter = 0,
-int abs_out = 1,
+int abs_out = 0,
 int verbose = 0
 )
 OUTPUT PARAMETERS ()
@@ -158,45 +158,49 @@ TRACE
     double across = dx * across_x + dy * across_y;
     double rsq = dx * dx + dy * dy;
 
-    if (abs_out && rsq > radius * radius) {
-        ABSORB;
-    }
-    if (rsq < inner_radius * inner_radius) {
-        ABSORB;
-    }
-    if (xwidth > 0 && fabs(across) > xwidth / 2.0) {
-        ABSORB;
-    }
-
-    /* Where the ray crosses the disc, as an angle about the spindle measured from
-     * the beam crossing, in the sense the openings are numbered. */
-    double hit = RAD2DEG * atan2(across, along);
-
-    /* Where the disc's zero mark is at that moment. Parked, it stands at
-     * park_angle; turning, it reached the reference orientation at `delay` and has
-     * gone on from there. The rest of the test is the same either way, which is
-     * the point of writing it like this. */
-    double when = t + (jitter ? jitter * randnorm() : 0);
-    double mark = nu ? RAD2DEG * omega * (when - delay) : park_angle;
-
-    /* The ray's position on the disc itself, measured from the zero mark: the beam
-     * crosses at `beam_angle`, the ray is `hit` further round from the beam, and
-     * the disc has turned `mark` out from under both. */
-    double on_disc = nx_disk_chopper_wrap(beam_angle + hit - mark);
-
-    int through = 0;
-    for (int i = 0; i < n_edges; i += 2) {
-        double opening = nx_disk_chopper_wrap(slit_edges[i]);
-        double width = slit_edges[i + 1] - slit_edges[i];
-        /* measured from this opening's leading edge, so a slit spanning the zero
-         * mark needs no special case */
-        if (nx_disk_chopper_wrap(on_disc - opening) < width) {
-            through = 1;
-            break;
+    if (rsq <= radius * radius) {
+        if (rsq < inner_radius * inner_radius) {
+            ABSORB;
         }
-    }
-    if (!through) {
-        ABSORB;
+        if (xwidth > 0 && fabs(across) > xwidth / 2.0) {
+            ABSORB;
+        }
+
+        /* Where the ray crosses the disc, as an angle about the spindle measured from
+         * the beam crossing, in the sense the openings are numbered. */
+        double hit = RAD2DEG * atan2(across, along);
+
+        /* Where the disc's zero mark is at that moment. Parked, it stands at
+         * park_angle; turning, it reached the reference orientation at `delay` and has
+         * gone on from there. The rest of the test is the same either way, which is
+         * the point of writing it like this. */
+        double when = t + (jitter ? jitter * randnorm() : 0);
+        double mark = nu ? RAD2DEG * omega * (when - delay) : park_angle;
+
+        /* The ray's position on the disc itself, measured from the zero mark: the beam
+         * crosses at `beam_angle`, the ray is `hit` further round from the beam, and
+         * the disc has turned `mark` out from under both. */
+        double on_disc = nx_disk_chopper_wrap(beam_angle + hit - mark);
+
+        int through = 0;
+        for (int i = 0; i < n_edges; i += 2) {
+            double opening = nx_disk_chopper_wrap(slit_edges[i]);
+            double width = slit_edges[i + 1] - slit_edges[i];
+            /* measured from this opening's leading edge, so a slit spanning the zero
+             * mark needs no special case */
+            if (nx_disk_chopper_wrap(on_disc - opening) < width) {
+                through = 1;
+                break;
+            }
+        }
+        if (!through) {
+            ABSORB;
+        }
+    } else {
+        // outside of the disk entirely
+        if (abs_out) {
+            ABSORB;
+        }
     }
 %}
 
@@ -214,7 +218,7 @@ MCDISPLAY
      * housing, not to the disc, so it does not move when the disc is parked. */
     double mark = DEG2RAD * zero_angle;
     // line(spindle_x, spindle_y, 0, spindle_x + radius * sin(mark), spindle_y + radius * cos(mark), 0);
-    
+
     double turned = mark + (nu == 0 ? DEG2RAD * park_angle : 0.0);
     double deg_resolution = 1.0;
     if (mcdotrace == 1) {
