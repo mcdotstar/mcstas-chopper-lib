@@ -130,7 +130,7 @@ DEFINE INSTRUMENT Masked_ESS_butterfly_image(
   disc_radius = 0.5,
   slit_height = 0.1,
   slit_width = 0.1,
-  int growth = 10,
+  int growth = 1,
   int do_mask = 1
 )
 
@@ -232,7 +232,7 @@ AT (0, 0, 0) ABSOLUTE
  * applies it; `filename` names the two files it writes the mask and the sampling to. */
 COMPONENT source = Masked_ESS_butterfly(
   sector = "N", beamline = 1, Lmin = lambda_min, Lmax = lambda_max,
-  yheight = 0.03, cold_frac = 0.5, dist = near_path, focus_xw = slit_width, focus_yh = slit_height,
+  yheight = 0.03, cold_frac = 0.5, dist = far_path, focus_xw = slit_width, focus_yh = slit_height,
   acc_power = 2.0, n_pulses = 1,
   choppers = train_as_doubles, chopper_count = 2,
   inverse_velocity_bin = iv_bin, time_bin = t_bin,
