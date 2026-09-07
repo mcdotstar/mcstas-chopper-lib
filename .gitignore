@@ -1,5 +1,7 @@
 *build*/
 */__pycache__/
 bifrost_*.c
-# mccode-antlr caches a parsed component beside the .comp when the tests run
+# mccode-antlr caches a parsed component beside the .comp when the tests run,
+# salted with its own build since 0.27 -- Masked_ESS_butterfly.comp.8553da4f0f17.json
 *.comp.json
+*.comp.*.json

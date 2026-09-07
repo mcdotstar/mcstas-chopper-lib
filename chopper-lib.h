@@ -8,21 +8,48 @@
  *
  * \section versioning Versioning
  *
- * The chopper structures are handed to this library as flat `double` arrays -- see
- * `Masked_ESS_butterfly.comp`, which casts a `double *` to `chopper_parameters *`. A
- * change to what a field *means* therefore does not change the size or layout of
- * anything, and a caller written against an older meaning compiles cleanly and computes
- * the wrong answer in silence.
+ * A caller populating a chopper structure is describing a disk in this library's terms,
+ * and those terms have changed three times. Before 4.0.0 the structures were flat runs of
+ * `double`, so a change to what a field *meant* changed neither size nor layout and an
+ * older caller compiled cleanly and computed the wrong answer in silence.
  *
  * `CHOPPER_LIB_VERSION` exists so a caller can refuse to do that. Assert on it wherever
  * a chopper structure is populated:
  *
- *     #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 30000
- *     #error "This instrument sets multi-opening choppers; chopper-lib 3.0.0 or newer is required"
+ *     #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
+ *     #error "This instrument describes disks by their slit edges; chopper-lib 4.0.0 or newer is required"
  *     #endif
+ *
+ * From 4.0.0 the structure holds a pointer and a count, so most mistakes are now compile
+ * errors rather than silent ones -- but the guard still earns its place, because the
+ * *meaning* of an edge angle changed at the same time and no compiler can see that.
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.0.0
+ *     One `chopper_parameters` describes a disk of any number of openings, by its slit
+ *     edges. `chopper_window`, `multi_chopper_parameters`, `single_to_multi_chopper` and
+ *     the parallel `multi_chopper_*` functions are gone; the `angle` field is gone with
+ *     them.
+ *
+ *     `edges` is the `slit_edges` of the NeXus NXdisk_chopper specification: angles from
+ *     the disk's top-dead-centre mark, strictly increasing, opening edge first. Window
+ *     angles were measured against the beam and in the opposite sense, so an edge that
+ *     was `a` is now `beam - a` and each pair has swapped ends.
+ *
+ *     The new `beam` field is the angle from the mark to where the beam crosses the disk
+ *     -- the `beam` of the same NeXus specification. It used to have to be folded into
+ *     `delay` or into every window angle by the caller; it is a field now, so a disk is
+ *     described the same way here as it is in the file and in the McStas component.
+ *
+ *     A disk parked shut is a beam stop. Every disk with a `speed` of zero used to be
+ *     left out of the calculation, which is right for one parked open -- it has no
+ *     period, so it constrains nothing -- and wrong for one parked shut, which passes
+ *     nothing at any time and was reported as a band the instrument would not deliver.
+ *     The window and mask functions now empty their answer for one, as they already did
+ *     for a disk with no openings, and name it on stdout on the way past.
+ *     `chopper_parked_is_open` is the predicate they use, and says whether a disk that is
+ *     not turning stands open on the beam.
  * 3.0.0
  *     A `multi_chopper_parameters` window angle is placed with the *signed* `speed`:
  *     an opening at angle `a` is on the beam at `delay + a / (360 * speed)`. The mask
@@ -36,7 +63,7 @@
  * 1.0.0
  *     Unversioned releases, taking `phase`.
  */
-#define CHOPPER_LIB_VERSION_MAJOR 3
+#define CHOPPER_LIB_VERSION_MAJOR 4
 #define CHOPPER_LIB_VERSION_MINOR 0
 #define CHOPPER_LIB_VERSION_PATCH 0
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
@@ -109,116 +136,76 @@ range_set range_set_sort(range_set s);
 range_set range_intersection(range_set ain, range_set bin);
 
 
-/** The parameters of a single-opening disk chopper.
+/** The parameters of a disk chopper, of one opening or several.
  *
- * @param speed The rotation speed of the disk, in Hz
- * @param delay When the centre of an opening is on the path, in seconds
- * @param angle The opening size of the disk, in degrees
- * @param path  The path length from the 'zero'-time source to the disk positon, in meters
+ * @param speed The rotation speed of the disk in Hz; negative turns it the other way
+ * @param delay When the disk point at angle `beam` is on the path, in seconds
+ * @param beam The angle from the disk's zero mark to where the beam crosses it, in degrees
+ * @param edge_count The number of entries in `edges`: two per opening, so always even
+ * @param edges The opening and closing edge of each opening, in degrees from the zero mark
+ * @param path The path length from the 'zero'-time source to the disk position, in meters
  *
- * A multi-opening chopper could be treated as a single-opening chopper if all openings are the same size and
- * are distributed equally around the disk. In such a case the speed parameter of this structure should be the
- * 'opening appearance' frequency, so the rotation speed times the number of equally spaced openings.
+ * `edges` is the `slit_edges` of the NeXus NXdisk_chopper specification, and what McStas'
+ * `CollectorDiskChopper` takes: an even number of angles measured from the top-dead-centre
+ * mark, strictly increasing, the opening edge of each slit first, spanning less than one
+ * turn. A slit straddling the mark is written with a final edge past 360 -- `{350, 370}`
+ * rather than `{350, 10}` -- so the pairs stay ordered and each width is a difference.
  *
- * `delay` is unaffected by that substitution, and by the sign of `speed`: it is a time, and openings recur at
- * `delay + n / speed` for integer `n`. This is what McStas' `DiskChopper` acts on, and what a real chopper is
- * set with. It was a `phase` in degrees before version 2.0.0, from which this library recovered a delay by
- * dividing by `360 * fabs(speed)` at every point of use; a delay says the same thing without needing to know
- * the speed, and -- unlike a phase, which wraps at one revolution -- may exceed a single period.
+ * Nothing here requires the angles to be positive. NXdisk_chopper does, and a caller
+ * writing a NeXus file should rotate which slit comes first to satisfy it, but a disk with
+ * one opening astride its mark reads better here as `{-85, 85}` than as `{275, 445}`.
+ *
+ * An edge at angle `a` is on the beam at
+ *
+ *     t(a) = delay + (beam - a) / (360 * speed)
+ *
+ * and every `1 / |speed|` seconds thereafter. Two things follow from the signs. The
+ * angular term is negated, because `edges` increase in the direction the NeXus
+ * specification measures and a disk carries a larger angle *towards* the beam; and it
+ * keeps the sign of `speed`, so reversing the disk brings an opening onto the beam on the
+ * other side of `delay`.
+ *
+ * `delay` is a time, so it is unaffected by the sign of `speed`, and openings recur at
+ * `delay + n / speed` for integer `n`. It is what McStas' `DiskChopper` acts on and what a
+ * real chopper is set with. It was a `phase` in degrees before version 2.0.0, from which
+ * this library recovered a delay by dividing by `360 * fabs(speed)` at every point of use;
+ * a delay says the same thing without needing to know the speed, and -- unlike a phase,
+ * which wraps at one revolution -- may exceed a single period.
+ *
+ * A disk of `n` identical, evenly spaced openings may be described as one opening turning
+ * `n` times as fast, if that is more convenient; `delay` is unaffected by the substitution.
  */
 struct chopper_parameters_struct {
   double speed; // rotation frequency in Hz
-  double delay; // when an opening centre is on the path, in seconds
-  double angle; // *single* window opening angle in degrees
+  double delay; // when the disk point at angle `beam` is on the path, in seconds
+  double beam; // from the zero mark to the beam crossing, in degrees
+  unsigned edge_count; // number of entries in edges, two per opening
+  double * edges; // opening and closing edge of each opening, in degrees from the mark
   double path; // average(?) path length from source to this chopper in meters
 };
 typedef struct chopper_parameters_struct chopper_parameters;
 
-struct chopper_window_struct {
-  double min; // the minimum angle of the window in degrees with respect to the beam
-  double max; // the maximum angle of the window in degrees with respect to the beam
-};
-typedef struct chopper_window_struct chopper_window;
 
-/** The parameters of a multi-opening disk chopper
- * @param speed The rotation speed of the disk, in Hz
- * @param delay When the zero-angle point of the disk is on the path, in seconds
- * @param window_count The number of openings in the disk
- * @param windows An array of window edge minima and maxima, relative to the zero-angle point on the disk
- * @param path  The path length from the 'zero'-time source to the disk positon, in meters
+/** Whether a disk that is not turning stands open on the beam
  *
- * An opening edge at angle `a` degrees is on the beam at
+ * A parked disk is open or shut for good: with no speed there is no period to recur on
+ * and no delay to apply, so either `beam` is inside one of the `edges` pairs or it is on
+ * the solid part of the disk. Angles fold, so an opening written across the mark --
+ * `{350, 370}` -- and a negative `beam` both work.
  *
- *     t(a) = delay + a / (360 * speed)
+ * The window and the mask functions leave a disk parked open out of their calculation,
+ * because a disk with no period constrains no inverse velocity. One parked shut is a
+ * beam stop: they name it on stdout and return nothing at all, the same answer they give
+ * for a disk with no openings and for a train whose disks never agree. Call this first
+ * to tell that apart from a train that is merely over-constrained, or to decide what a
+ * shut disk should mean in your own terms.
  *
- * and every `1 / |speed|` seconds thereafter. The angular term keeps the sign of `speed`,
- * so reversing the disk brings a window at a positive angle onto the beam *before* the
- * zero-angle point rather than after it. Only a window symmetric about zero -- which is
- * all `single_to_multi_chopper` produces -- is unaffected by that sign.
- *
- * The angle between the disk's zero-degree reference and the point where the beam crosses
- * the disk is the 'beam' angle of the NeXus NXdisk_chopper specification. This structure
- * has no field for it, because it is already folded into `delay`: `delay` is measured to
- * the beam, not to whatever reference the window angles are quoted against. If you are
- * translating from a description that separates the two, fold `beam` in yourself, either
- * by shifting the delay:
- *
- * ```c
- *    chopper_window * windows = calloc(N, sizeof(chopper_window));
- *    windows[0].min = first_min;
- *    windows[0].max = first_max;
- *    ...
- *    windows[N-1].min = last_min;
- *    windows[N-1].max = last_max;
- *
- *    multi_chopper_parameters parameters = {
- *        .speed = speed,
- *        .delay = delay - beam / 360.0 / speed,
- *        .window_count = N,
- *        .windows = windows,
- *        .path = path
- *    };
- * ```
- *
- * or, equivalently, by shifting every window angle:
- *
- * ```c
- *    chopper_window * windows = calloc(N, sizeof(chopper_window));
- *    windows[0].min = first_min - beam;
- *    windows[0].max = first_max - beam;
- *    ...
- *    windows[N-1].min = last_min - beam;
- *    windows[N-1].max = last_max - beam;
- *
- *    multi_chopper_parameters parameters = {
- *        .speed = speed,
- *        .delay = delay,
- *        .window_count = N,
- *        .windows = windows,
- *        .path = path
- *    };
- * ```
- *
- * The two agree because `t(a - beam)` with the original delay is `t(a)` with the delay
- * reduced by `beam / (360 * speed)`. Note the factor of 360: `beam` is an angle and
- * `speed` is a frequency, so `beam / speed` alone is not a time.
+ * @param chopper The disk to test; its `speed` is not read, since a turning disk stands
+ *                open on the beam once a period whatever its angles are
+ * @return 1 if the beam crosses an opening, 0 if it crosses the disk body or the disk has
+ *         no openings at all
  */
-struct multi_chopper_parameters_struct {
-  double speed; // rotation frequency in Hz
-  double delay; // when the 0-angle point of the disk is at the beam center, in seconds
-  unsigned window_count; // number of windows
-  chopper_window * windows; // array of window definitions
-  double path; // average(?) path length from source to this chopper in meters
-};
-typedef struct multi_chopper_parameters_struct multi_chopper_parameters;
-
-/** Convert single-opening chopper parameters to multi-opening chopper parameters
- *
- * @param single The parameters of a single-opening disk chopper
- * @return A multi_chopper_parameters structure representing the equivalent multi-opening chopper
- * @warning The returned structure's `windows` property is allocated in the function and must be freed at calling scope.
- */
-multi_chopper_parameters single_to_multi_chopper(chopper_parameters single);
+int chopper_parked_is_open(chopper_parameters chopper);
 
 /** Find the possible inverse velocity window(s) that are admitted by a series of disk choppers
  *
@@ -228,22 +215,12 @@ multi_chopper_parameters single_to_multi_chopper(chopper_parameters single);
  * @param inv_v_max The maximum inverse velocity to be considered -- how long before a neutron is no-longer interesting
  * @param latest_emission How long after time-zero can a neutron start its journey, effects minimum inverse velocities
  * @return One or more inverse velocity ranges that can pass through the chopper train as a `range_set`
+ * @note A disk parked open is left out: it has no period, so it constrains no inverse
+ *       velocity. One parked shut passes nothing at any time, so the returned set is
+ *       empty and the disk is named on stdout -- see `chopper_parked_is_open`.
  * @warning The returned value's `ranges` property is allocated in the function and must be freed at calling scope.
  */
 range_set chopper_inverse_velocity_windows(unsigned count, const chopper_parameters * choppers,
-                                           double inv_v_min, double inv_v_max, double latest_emission);
-
-/** Find the possible inverse velocity window(s) that are admitted by a series of disk choppers
- *
- * @param count The number of disk choppers provided
- * @param multi_choppers The parameters of the disk choppers
- * @param inv_v_min The minimum inverse velocity to be considered -- likely matching a guide cutoff
- * @param inv_v_max The maximum inverse velocity to be considered -- how long before a neutron is no-longer interesting
- * @param latest_emission How long after time-zero can a neutron start its journey, effects minimum inverse velocities
- * @return One or more inverse velocity ranges that can pass through the chopper train as a `range_set`
- * @warning The returned value's `ranges` property is allocated in the function and must be freed at calling scope.
- */
-range_set multi_chopper_inverse_velocity_windows(unsigned count, const multi_chopper_parameters * multi_choppers,
                                            double inv_v_min, double inv_v_max, double latest_emission);
 
 /** Find the enveloping limits of the possible inverse velocity window(s) that are admitted by a chopper train
@@ -262,24 +239,6 @@ unsigned chopper_inverse_velocity_limits(double * lower, double * upper,
                                          unsigned count, const chopper_parameters * choppers,
                                          double inv_v_min, double inv_v_max, double latest_emission);
 
-/** Find the enveloping limits of the possible inverse velocity window(s) that are admitted by a chopper train which
- * may contain any number of choppers with multiple openings
- *
- * @param lower Output lower inverse velocity limit, only set if the return value is finite
- * @param upper Output upper inverse velocity limit, only set if the return value is finite
- * @param count The number of choppers in the train
- * @param multi_choppers Parameters for each chopper
- * @param inv_v_min The minimum inverse velocity to be considered
- * @param inv_v_max The maximum inverse velocity to be considered
- * @param latest_emission How long after time-zero a neutron can start along the flight path
- * @return The number of inverse velocity windows admitted by the choppers, if greater than one the lower and upper
- *         values include in their range inverse velocities which are not passed by the chopper train.
- */
-unsigned multi_chopper_inverse_velocity_limits(
-  double * lower, double * upper, unsigned count, const multi_chopper_parameters * multi_choppers,
-  double inv_v_min, double inv_v_max, double latest_emission
-  );
-
 /** Find the enveloping limits of the possible wavelength window(s) that are admitted by a chopper train
  *
  * @param lower Output lower wavelength limit, only set if the return value is finite
@@ -295,24 +254,6 @@ unsigned multi_chopper_inverse_velocity_limits(
 unsigned chopper_wavelength_limits(double * lower, double * upper, unsigned count, const chopper_parameters * choppers,
                                    double lambda_min, double lambda_max, double latest_emission);
 
-/** Find the enveloping limits of the possible wavelength window(s) that are admitted by a chopper train which may
- *  contain choppers with multiple openings
- *
- * @param lower Output lower wavelength limit, only set if the return value is finite
- * @param upper Output upper wavelength limit, only set if the return value is finite
- * @param count The number of choppers in the train
- * @param multi_choppers Parameters for each chopper
- * @param lambda_min The minimum wavelength to be considered
- * @param lambda_max The maximum inverse velocity to be considered
- * @param latest_emission How long after time-zero a neutron can start along the flight path
- * @return The number of windows admitted by the choppers, if greater than one the lower and upper
- *         values include in their range wavelengths which are not passed by the chopper train.
- */
-unsigned multi_chopper_wavelength_limits(
-  double * lower, double * upper, unsigned count, const multi_chopper_parameters * multi_choppers,
-  double lambda_min, double lambda_max, double latest_emission
-  );
-
 /** Create a mask of allowed (inverse_velocity, time) bins based on chopper parameters
  *
  * @param mask [out] An array of integers to be filled with 1 (allowed) or 0 (blocked), of size (inverse_velocity_count-1) * (time_count-1)
@@ -326,34 +267,14 @@ unsigned multi_chopper_wavelength_limits(
  * @param chopper_count [in] The number of choppers provided
  * @param grow_mask [in] Expand the allowed regions by this number of bins in each direction
  * @return The number of unmasked (allowed) (inverse_velocity, time) bins
+ * @note A disk parked open is left out, as it is by the window functions; one parked
+ *       shut masks off every bin and is named on stdout -- see `chopper_parked_is_open`.
  */
 unsigned chopper_inverse_velocity_time_mask(
   int * mask, unsigned mask_inverse_velocity_count, unsigned mask_time_count,
   const double * inverse_velocities, unsigned inverse_velocity_count,
   const double * times, unsigned time_count,
   const chopper_parameters * choppers, unsigned chopper_count,
-  int grow_mask
-  );
-
-/** Create a mask of allowed (inverse_velocity, time) bins based on multi-chopper parameters
- *
- * @param mask [out] An array of integers to be filled with 1 (allowed) or 0 (blocked), of size (inverse_velocity_count-1) * (time_count-1)
- * @param mask_inverse_velocity_count [in] The number of inverse velocity bins in the mask (should be inverse_velocity_count - 1)
- * @param mask_time_count [in] The number of time bins in the mask (should be time_count - 1)
- * @param inverse_velocities [in] An array of inverse velocities (in s/m), of size inverse_velocity_count
- * @param inverse_velocity_count [in] The number of inverse velocities provided
- * @param times [in] An array of times at the source position (in s), of size time_count
- * @param time_count [in] The number of times provided
- * @param choppers [in] An array of multi chopper parameters, of size chopper_count
- * @param chopper_count [in] The number of choppers provided
- * @param grow_mask [in] Expand the allowed regions by this number of bins in each direction
- * @return The number of unmasked (allowed) (inverse_velocity, time) bins
- */
-unsigned multi_chopper_inverse_velocity_time_mask(
-  int * mask, unsigned mask_inverse_velocity_count, unsigned mask_time_count,
-  const double * inverse_velocities, unsigned inverse_velocity_count,
-  const double * times, unsigned time_count,
-  const multi_chopper_parameters * choppers, unsigned chopper_count,
   int grow_mask
   );
 

@@ -1,0 +1,180 @@
+/*******************************************************************************
+* Instrument: NXdisk_chopper_image
+*
+* %I
+* Written by: Gregory Tucker
+* Date: 2026
+* Origin: European Spallation Source ERIC
+*
+* Project a parked NXdisk_chopper onto an imaging plane; scan the park angle for
+* a movie of the disc turning.
+*
+* %D
+* A shadowgraph, not a simulation. A flat, monochromatic, perfectly collimated
+* field larger than the disc falls on one parked chopper, and a PSD a millimetre
+* behind it records what got through. With `abs_out = 1` everything but an
+* opening absorbs -- the disc body, the hub, and the field outside the rim -- so
+* the image *is* `slit_edges`, drawn as annular sectors between `yheight` and
+* `radius`. Reading the geometry off the picture is the point: the arcs' outer
+* radius is the disc's, their inner radius is the hub's, and their angular
+* extents are the openings.
+*
+* The disc has five openings of five different widths (8, 15, 25, 40 and 60
+* degrees) at unevenly spaced angles. Nothing about it is symmetric, so any
+* rotation of the image is distinguishable from any other -- which is what makes
+* a scan of `park` legible as a movie rather than as an ambiguous flicker.
+*
+* One frame:
+*
+*   mcstas-antlr NXdisk_chopper_image.instr
+*   ./NXdisk_chopper_image.out -n 262144 park=0
+*
+* The movie, at five degrees a frame:
+*
+*   mcrun NXdisk_chopper_image.instr park=0,355 -N 72 -n 262144 -d frames
+*
+* `-n` should be exactly `npix * npix` (262144 for the default 512). The source
+* rasters one ray per pixel onto the PSD's own grid rather than sampling at
+* random, so at that count every pixel gets exactly one ray, the image carries no
+* shot noise at all, and successive frames differ only where the disc moved. A
+* larger `-n` has to be a whole multiple or the last partial pass brightens one
+* band of the image; a smaller one leaves the top of the frame black.
+*
+* Run it single-process. Under MPI the ray index is offset per node, which
+* scrambles the raster.
+*
+* The same movie with the disc turning instead of parked, which exercises the
+* other branch of the component's TRACE:
+*
+*   mcrun NXdisk_chopper_image.instr nu=14 delay=0,-0.0714 -N 72 -n 262144 -d turning
+*
+* These are the same movie, frame for frame and pixel for pixel: rays cross the
+* disc at t = 0, so a turning disc stands at `mark = -360 nu delay` and reaches
+* the parked orientation `park` at `delay = -park / (360 nu)`. One period is
+* `1/nu`, hence the -0.0714 for a full turn at 14 Hz. Checking the two against
+* each other is the point -- the parked branch is the one a commissioning run
+* uses and the turning branch is the one every simulation uses, and nothing else
+* here makes them meet.
+*
+* %P
+* park: [deg]     where the disc's zero mark stands while parked; scan this for a movie
+* nu: [Hz]        signed rotation frequency; 0 (the default) parks the disc
+* delay: [s]      when the zero mark is on the beam, read only when nu is non-zero
+* beam_angle: [deg] where the beam crosses the disc, from the zero mark
+* zero_angle: [deg] from +y to the top-dead-centre pickup
+* disc_radius: [m] outer radius of the disc
+* slit_height: [m] radial height of the openings, so the hub is disc_radius - slit_height
+* lambda: [AA]    wavelength of the illuminating field
+* field: [m]      side of the square illuminated area and of the PSD
+* npix: [1]       pixels per side of the PSD, and rays per side of the raster
+*
+* %E
+*******************************************************************************/
+DEFINE INSTRUMENT NXdisk_chopper_image(
+  park = 0,
+  nu = 0,
+  delay = 0,
+  beam_angle = 0,
+  zero_angle = 0,
+  disc_radius = 0.35,
+  slit_height = 0.30,
+  lambda = 2.0,
+  field = 0.72,
+  int npix = 512
+)
+
+DECLARE
+%{
+double * edges;
+double delta_y;     /* the beam crosses the disc this far from the spindle */
+double spindle_x;   /* and so the spindle sits here, in the chopper's own frame */
+double spindle_y;
+double v0;          /* the single speed every ray is given */
+double chopper_z;   /* how far the disc is from the source */
+%}
+
+INITIALIZE
+%{
+/* Five openings, five widths, none evenly spaced: 8, 15, 25, 40 and 60 degrees.
+ * Strictly increasing and spanning 300 degrees, as the component requires. */
+edges = (double *) calloc(10, sizeof(double));
+edges[0] =  10;  edges[1] =  18;   /*  8 deg */
+edges[2] =  45;  edges[3] =  60;   /* 15 deg */
+edges[4] = 100;  edges[5] = 125;   /* 25 deg */
+edges[6] = 150;  edges[7] = 190;   /* 40 deg */
+edges[8] = 250;  edges[9] = 310;   /* 60 deg */
+
+/* Where the spindle is, repeated from the component so the source and the PSD can
+ * be centred on the disc rather than on the beam crossing the component marks.
+ * Without this the disc sits off to one side of the image, and moves whenever
+ * beam_angle or zero_angle changes. */
+delta_y = disc_radius - slit_height / 2.0;
+spindle_x = -delta_y * sin(DEG2RAD * (zero_angle + beam_angle));
+spindle_y = -delta_y * cos(DEG2RAD * (zero_angle + beam_angle));
+
+v0 = K2V * 2 * PI / lambda;
+chopper_z = 1.0;
+
+printf("NXdisk_chopper_image: %d x %d pixels over %g m; run with -n %lld\n",
+       npix, npix, field, (long long) npix * (long long) npix);
+%}
+
+TRACE
+
+COMPONENT origin = Progress_bar()
+AT (0, 0, 0) ABSOLUTE
+
+/* A flat field, as an Arm that places every ray itself.
+ *
+ * One ray per pixel, at the pixel's centre, on the PSD's own grid: the raster and
+ * the monitor share an origin and a pitch, so each ray falls unambiguously in one
+ * pixel and no two rays share one. That is worth more here than random sampling --
+ * the image is exactly the transmission function, with no noise to average down
+ * and nothing that flickers between frames of the movie.
+ */
+COMPONENT source = Arm()
+AT (spindle_x, spindle_y, 0) ABSOLUTE
+EXTEND
+%{
+  long long idx = mcget_run_num();
+  /* An instrument parameter's short name is a macro, and it is only defined
+   * around the instrument's own INITIALIZE and FINALLY -- an EXTEND block is
+   * emitted inside the component's trace function, where it has been #undef'd.
+   * What the macro expands to is reachable from anywhere, so read it directly. */
+  long long n = instrument->_parameters.npix;
+  long long col = idx % n;
+  long long row = (idx / n) % n;
+  x = instrument->_parameters.field * (((double) col + 0.5) / (double) n - 0.5);
+  y = instrument->_parameters.field * (((double) row + 0.5) / (double) n - 0.5);
+  z = 0;
+  vx = 0; vy = 0; vz = v0;
+  /* Emitted early, so that PROP_Z0 in the chopper lands the ray on the disc at
+   * t = 0 rather than one flight time later. That is what makes `delay` and
+   * `park` directly comparable: a turning disc reaches the orientation `park`
+   * at `delay = -park / (360 nu)`, with no flight term to carry around. */
+  t = -chopper_z / v0;
+  p = 1;
+%}
+
+/* The disc under test. It is the component origin that sits on the beam, so this
+ * is at the axis while the disc it carries hangs off to one side of it. */
+COMPONENT chopper = NXdisk_chopper(
+  slit_edges = edges, n_edges = 10,
+  radius = disc_radius, yheight = slit_height,
+  nu = nu, delay = delay, park_angle = park,
+  beam_angle = beam_angle, zero_angle = zero_angle,
+  abs_out = 1, verbose = 2
+) AT (0, 0, chopper_z) ABSOLUTE
+
+/* Directly behind the disc, centred on the spindle so the whole disc is in frame. */
+COMPONENT image = PSD_monitor(
+  nx = npix, ny = npix, filename = "shadow",
+  xwidth = field, yheight = field, restore_neutron = 0
+) AT (spindle_x, spindle_y, chopper_z + 0.001) ABSOLUTE
+
+FINALLY
+%{
+if (edges) free(edges);
+%}
+
+END

@@ -2,7 +2,21 @@ import time
 from contextlib import ContextDecorator
 from pathlib import Path
 from textwrap import dedent
+import pytest
 from pytest import mark
+
+# These tests drive niess' chopper train emission, which is in no niess release yet:
+# `train_from_instrument`, and the `narrow_source_wavelengths` that takes a train
+# positionally, postdate v0.6.0 -- which has `build_train` and a keyword-only
+# `narrow_source_wavelengths` in their place -- and postdate the commit requirements.txt
+# pins besides. Skip the module rather than fail collection on the import, so a checkout
+# with a released niess, or with none at all, still collects and runs the rest.
+try:
+    from niess.chopcalc import train_from_instrument  # noqa: F401
+except ImportError:
+    pytest.skip("these tests need niess.chopcalc.train_from_instrument, which the "
+                "installed niess does not provide", allow_module_level=True)
+
 from mccode_antlr import Flavor
 from niess.components import ESSource
 from scipp import Variable
@@ -43,7 +57,10 @@ class MaskedESSource(ESSource):
 
     def __mccode__(self) -> tuple[str, dict]:
         _, params = super().__mccode__()
-        params['choppers'] = self.identifier_choppers
+        # chopper-lib's array is a `chopper_parameters *`; the component's parameter is
+        # `double *`, which is the only pointer McStas can carry. The cast is the
+        # documented way to hand a struct array over.
+        params['choppers'] = f'(double *) {self.identifier_choppers}'
         params['chopper_count'] = self.identifier_chopper_count
         params['inverse_velocity_bin'] = self.inverse_velocity_bin.to(unit='s/m').value
         params['time_bin'] = self.time_bin.to(unit='s').value
@@ -123,47 +140,23 @@ def get_registries():
     return registries + [this_registry()]
 
 
-def bifrost_chopper_initialize(assembler):
-    from niess.chopcalc.discovery import build_train
-    train = build_train(assembler.instrument)
-    lines = ',\n'.join(
-            f'  {{{c.speed}, {c.delay}, {c.angle}, {c.path}}}'
-            f' /* {c.name}{"" if c.note is None else " -- " + c.note} */'
-            for c in train.choppers
-            )
-
-    assembler.declare(dedent("""
-    double * chopper_ptr;
-    unsigned chopper_cnt;
-    """))
-    init = "chopper_parameters pars[] = { " + lines + " };" + dedent("""
-    chopper_ptr = (double *) pars;
-    chopper_cnt = sizeof(pars)/sizeof(chopper_parameters);
-    
-    double lambda_0 = source_lambda_min, lambda_1 = source_lambda_max;
-    double pulse_delay = 2.0e-4; // approximate time to peak brightness after protons
-    double pulse_width = 2.86e-3; // duration of high flux plateau
-    double latest = pulse_delay + pulse_width + 2e-3; // extra for good measure?
-    unsigned windows = chopper_wavelength_limits(
-     &source_lambda_min, &source_lambda_max, chopper_cnt, pars, lambda_0, lambda_1, latest
-    );
-    if (windows == 0){
-     printf("Chopper train will not pass wavelengths between %f and %f angstrom\\n", lambda_0, lambda_1);
-     printf("Examine the provided chopper speeds and delays.\\n");
-    }
-    if (windows > 1){
-     printf("Chopper train will pass %u wavelength ranges between %f and %f angstrom\\n", windows, lambda_0, lambda_1);
-     printf("but only their envelope is considered.\\n");
-    }
-    printf("Using source lambda limits %f to %f\\n", source_lambda_min, source_lambda_max);
-    """)
-    assembler.initialize(init)
-
-
 def bifrost_primary(masked: bool = False):
+    """The BIFROST primary spectrometer, with its source band narrowed to what its
+    choppers pass.
+
+    `narrow_source_wavelengths` emits the chopper-lib include, the version guard and the
+    `chopper_parameters` array, and -- because `export_choppers` is given -- publishes
+    that array for `Masked_ESS_butterfly` to read as its `choppers` parameter. Building
+    the array by hand here would only be a second copy of chopper-lib's calling
+    convention to keep in step with it.
+    """
     from scipp import scalar
     from mccode_antlr.assembler import Assembler
     from niess.bifrost import Primary
+    from niess.chopcalc import narrow_source_wavelengths, train_from_instrument
+    from niess.instrument import Instrument, Mount
+    from niess.mccode import to_mccode
+
     name = 'bifrost_masked_ess_source' if masked else 'bifrost_ess_source'
     assembler = Assembler(name, flavor=Flavor.MCSTAS, registries=get_registries())
     primary = Primary.from_calibration()
@@ -177,11 +170,17 @@ def bifrost_primary(masked: bool = False):
             'inverse_velocity_bin': scalar(0.001, unit='s/m'),
             'time_bin': scalar(0.001, unit='s')
         })
-    else:
-        assembler.initialize('%include "chopper-lib"')
 
-    primary.to_mccode(assembler)
-    bifrost_chopper_initialize(assembler)
+    tree = Instrument(name=name, parts=(Mount(name='primary', content=primary),))
+    to_mccode(tree, assembler=assembler)
+    narrow_source_wavelengths(
+        assembler, train_from_instrument(tree),
+        # the masked source reads the train; publishing it unconditionally keeps the two
+        # instruments identical apart from the source itself, which is what they compare
+        export_choppers='chopper_ptr', export_chopper_count='chopper_cnt', strict=True,
+        # against this working tree rather than the published tag niess defaults to: a
+        # test living in the chopper-lib repository is here to check this copy of it
+        registry=str(this_registry().root))
     return assembler.instrument
 
 
