@@ -1,0 +1,95 @@
+/*******************************************************************************
+* Instrument: NXdisk_chopper_display
+*
+* %I
+* Written by: Gregory Tucker
+* Date: 2026
+* Origin: European Spallation Source ERIC
+*
+* Draw a NXdisk_chopper, to check its MCDISPLAY rendering.
+*
+* %D
+* Three discs in a line, exercising the cases the display has to get right:
+* a turning disc with two unevenly spaced openings, a parked disc (drawn turned
+* to its park angle), and a disc hanging above its beam.
+*
+* Nothing is simulated -- one ray is enough, because the point is the drawing.
+*
+* Run it two ways and compare:
+*
+*   mcstas-antlr chopper_display.instr
+*   ./chopper_display.out --trace   -n 1    # circles and a spoke, the old rendering
+*   ./chopper_display.out --trace=2 -n 1    # a triangulated polygon per disc
+*
+* The second prints one `MCDISPLAY: polyhedron { ... }` line per disc, in the JSON
+* `mcdis_polygon` builds for `mcdis_polyhedron`. To check one by hand:
+*
+*   ./chopper_display.out --trace=2 -n 1 \
+*     | grep '^MCDISPLAY: polyhedron' | head -1 \
+*     | sed 's/^MCDISPLAY: polyhedron //' | python3 -m json.tool | head
+*
+* Or view it: `mcdisplay-webgl chopper_display.instr` (any mcdisplay backend that
+* understands the polyhedron directive).
+*
+* %P
+* nu: [Hz]  rotation frequency of the first two discs
+*
+* %E
+*******************************************************************************/
+DEFINE INSTRUMENT chopper_display(nu = 14)
+
+DECLARE 
+%{
+double * two_slit_edges;
+double * one_slit_edges;
+double parked_edges[2];
+%}
+INITIALIZE
+%{
+two_slit_edges = (double *) calloc (4, sizeof(double));
+two_slit_edges[0] = 10;
+two_slit_edges[1] = 30;
+two_slit_edges[2] = 100;
+two_slit_edges[3] = 140;
+
+one_slit_edges = (double *) calloc (2, sizeof(double));
+one_slit_edges[0] = 170;
+one_slit_edges[1] = 190;
+
+parked_edges[0] = 90;
+parked_edges[1] = 270;
+%}
+
+TRACE
+
+COMPONENT origin = Progress_bar()
+AT (0, 0, 0) ABSOLUTE
+
+/* Two unevenly spaced openings: the case a McStas DiskChopper cannot describe as
+ * one component, and the reason the display cannot just draw n identical wedges. */
+COMPONENT uneven = NXdisk_chopper(
+  slit_edges = two_slit_edges, n_edges = 4,
+  radius = 0.35, yheight = 0.06, nu = nu, delay = 0
+) AT (0, 0, 1) ABSOLUTE
+
+/* Parked. The openings are drawn turned to park_angle; the spoke is not, because
+ * the pickup is fixed to the housing rather than to the disc. */
+COMPONENT parked = NXdisk_chopper(
+  slit_edges = parked_edges, n_edges = 2,
+  radius = 0.35, yheight = 0.06, nu = 0, park_angle = 120
+) AT (0, 1, 2) ABSOLUTE
+
+/* Hanging above its beam, so the spindle is drawn above the component origin
+ * rather than below it. */
+COMPONENT overhead = NXdisk_chopper(
+  slit_edges = one_slit_edges, n_edges = 2,
+  radius = 0.35, yheight = 0.06, nu = nu, delay = 0, beam_angle = 180
+) AT (1, 0, 3) ABSOLUTE
+
+FINALLY
+%{
+free(one_slit_edges);
+free(two_slit_edges);
+%}
+
+END
