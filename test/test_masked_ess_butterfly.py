@@ -2,7 +2,21 @@ import time
 from contextlib import ContextDecorator
 from pathlib import Path
 from textwrap import dedent
+import pytest
 from pytest import mark
+
+# These tests drive niess' chopper train emission, which is in no niess release yet:
+# `train_from_instrument`, and the `narrow_source_wavelengths` that takes a train
+# positionally, postdate v0.6.0 -- which has `build_train` and a keyword-only
+# `narrow_source_wavelengths` in their place -- and postdate the commit requirements.txt
+# pins besides. Skip the module rather than fail collection on the import, so a checkout
+# with a released niess, or with none at all, still collects and runs the rest.
+try:
+    from niess.chopcalc import train_from_instrument  # noqa: F401
+except ImportError:
+    pytest.skip("these tests need niess.chopcalc.train_from_instrument, which the "
+                "installed niess does not provide", allow_module_level=True)
+
 from mccode_antlr import Flavor
 from niess.components import ESSource
 from scipp import Variable
