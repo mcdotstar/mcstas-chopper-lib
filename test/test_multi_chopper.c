@@ -415,6 +415,110 @@ static void test_the_mask_follows_the_delay(void) {
   }
 }
 
+/* An aperture widens every window in time, by half of itself at each end.
+ *
+ * A disk's opening is angular and a beam is not: a neutron crossing the disk to one side
+ * of the beam centre meets an edge earlier or later than one crossing at the centre, by
+ * the angle between them over the rate the disk turns. So a beam `aperture` degrees wide
+ * is in the opening for half of that either side of the times the edges alone give.
+ *
+ * The window moves outwards and not sideways, and by the same amount whichever way the
+ * disk turns -- a width has no sign -- and an aperture of zero has to leave every number
+ * exactly where it was, since that is what every caller that does not set one gets.
+ */
+static void test_an_aperture_widens_a_window_at_both_ends(void) {
+  TEST("a beam of finite width opens each window earlier and closes it later");
+  double edges[2] = {-3.0, 3.0};
+  const double aperture = 6.0;                       /* degrees */
+  const double widening = aperture / 2.0 / 360.0 / SPEED;   /* seconds at each end */
+  const chopper_parameters point = {
+    .speed = SPEED, .delay = DELAY, .beam = 0.0,
+    .edge_count = 2, .edges = edges, .path = PATH, .aperture = 0.0};
+  const chopper_parameters wide = {
+    .speed = SPEED, .delay = DELAY, .beam = 0.0,
+    .edge_count = 2, .edges = edges, .path = PATH, .aperture = aperture};
+  const chopper_parameters reversed = {
+    .speed = -SPEED, .delay = DELAY, .beam = 0.0,
+    .edge_count = 2, .edges = edges, .path = PATH, .aperture = aperture};
+
+  range_set p = chopper_inverse_velocity_windows(1, &point, IV_MIN, IV_MAX, 0.0);
+  range_set w = chopper_inverse_velocity_windows(1, &wide, IV_MIN, IV_MAX, 0.0);
+  range_set r = chopper_inverse_velocity_windows(1, &reversed, IV_MIN, IV_MAX, 0.0);
+
+  CHECK(p.count > 0);
+  CHECK_EQUAL_INT(w.count, p.count);
+  CHECK_EQUAL_INT(r.count, p.count);
+  if (w.count == p.count && r.count == p.count) {
+    for (unsigned i = 0; i < p.count; ++i) {
+      /* each end moves out by the widening, in inverse velocity over the flight path */
+      CHECK_CLOSE(w.ranges[i].minimum, p.ranges[i].minimum - widening / PATH, 1e-15);
+      CHECK_CLOSE(w.ranges[i].maximum, p.ranges[i].maximum + widening / PATH, 1e-15);
+      /* so the centre stands still and only the width changes */
+      CHECK_CLOSE(centre_of(w.ranges[i]), centre_of(p.ranges[i]), 1e-15);
+      CHECK_CLOSE(half_of(w.ranges[i]) - half_of(p.ranges[i]), widening / PATH, 1e-15);
+      /* and a width has no sign, so reversing the disk widens it the same */
+      CHECK_CLOSE(half_of(r.ranges[i]), half_of(w.ranges[i]), 1e-15);
+    }
+  }
+  if (p.ranges) free(p.ranges);
+  if (w.ranges) free(w.ranges);
+  if (r.ranges) free(r.ranges);
+}
+
+/* The mask hears about the aperture too, and hears the same thing.
+ *
+ * The two are separate implementations of one description, so an aperture has to reach
+ * both of them or a mask built for a wide beam would cut what the window list admits.
+ * That is the failure this pins: it is the mask a source applies, ray by ray.
+ */
+static void test_the_mask_widens_with_the_aperture(void) {
+  TEST("the time mask admits the wider window an aperture opens");
+  double edges[2] = {-3.0, 3.0};
+  const double aperture = 6.0;
+  const chopper_parameters wide = {
+    .speed = SPEED, .delay = DELAY, .beam = 0.0,
+    .edge_count = 2, .edges = edges, .path = PATH, .aperture = aperture};
+
+  range_set want = chopper_inverse_velocity_windows(1, &wide, 0.0, IV_MAX, 0.0);
+  range runs[16];
+  const unsigned found = mask_runs(&wide, runs, 16);
+
+  CHECK(want.count > 0);
+  CHECK_EQUAL_INT(found, want.count);
+  if (found == want.count) {
+    const double tolerance = 3.0 * IV_MAX / 200000.0;
+    for (unsigned i = 0; i < found && i < 16; ++i) {
+      CHECK_CLOSE(centre_of(runs[i]), centre_of(want.ranges[i]), tolerance);
+      CHECK_CLOSE(half_of(runs[i]), half_of(want.ranges[i]), tolerance);
+    }
+  }
+  if (want.ranges) free(want.ranges);
+}
+
+/* An aperture wider than the opening is still just a window, and still centred.
+ *
+ * A beam wider than the slit it crosses is a real arrangement -- it is what a chopper
+ * with no collimation in front of it is -- and nothing in the arithmetic cares, but a
+ * width that swallows its own opening is where an off-by-one in the ordering would show.
+ */
+static void test_an_aperture_may_exceed_the_opening(void) {
+  TEST("an aperture wider than the opening widens it rather than confusing it");
+  double edges[2] = {-1.0, 1.0};
+  const double aperture = 30.0;
+  const chopper_parameters wide = {
+    .speed = SPEED, .delay = DELAY, .beam = 0.0,
+    .edge_count = 2, .edges = edges, .path = PATH, .aperture = aperture};
+
+  range_set w = chopper_inverse_velocity_windows(1, &wide, 0.0, IV_MAX, 0.0);
+  CHECK(w.count > 0);
+  if (w.count) {
+    const double expected = (1.0 + aperture / 2.0) / 360.0 / SPEED / PATH;
+    CHECK_CLOSE(centre_of(w.ranges[0]), DELAY / PATH, 1e-15);
+    CHECK_CLOSE(half_of(w.ranges[0]), expected, 1e-15);
+  }
+  if (w.ranges) free(w.ranges);
+}
+
 /* ---------------------------------------------------------------------------------
  * Trains, envelopes and wavelengths.
  * ------------------------------------------------------------------------------- */
@@ -736,6 +840,9 @@ int main(void) {
   test_reversing_the_disk_reflects_asymmetric_openings();
   test_the_mask_agrees_with_the_window_list();
   test_the_mask_follows_the_delay();
+  test_an_aperture_widens_a_window_at_both_ends();
+  test_the_mask_widens_with_the_aperture();
+  test_an_aperture_may_exceed_the_opening();
   test_a_train_keeps_only_the_openings_every_disk_admits();
   test_a_disk_parked_open_is_ignored();
   test_a_parked_disk_is_open_only_when_the_beam_is_in_an_opening();
