@@ -5,8 +5,26 @@ set(CMAKE_C_STANDARD 11)
 
 option(CHOPPER_LIB_COVERAGE "Instrument the library and its tests to measure line coverage" OFF)
 
+# The unit conversions chopper-lib.c uses, which it does not define itself: McStas
+# defines all three in its runtime, and the source is copied verbatim into every
+# instrument that %includes it, so a definition here would be a second definition of
+# PI in the generated C. Compiling the source anywhere else has to supply them, and
+# the file refuses to compile without them rather than fall back to its own numbers.
+# The values are the McStas runtime's. Cached, so that a consumer pulling this in with
+# FetchContent can read them: one that compiles chopper-lib.c into a target of its own,
+# instead of linking chopper_lib, needs
+#   target_compile_definitions(its_target PRIVATE ${CHOPPER_LIB_DEFINITIONS})
+set(CHOPPER_LIB_DEFINITIONS
+    V2K=1.58825361e-3          # v [m/s] to k [1/AA]
+    K2V=629.622368             # k [1/AA] to v [m/s]
+    PI=3.14159265358979323846
+    CACHE STRING "Constants chopper-lib.c is compiled with, matching the McStas runtime")
+
 add_library(chopper_lib SHARED chopper-lib.c)
 target_include_directories(chopper_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# PRIVATE: only the implementation reads them, and PI is too common a name to push onto
+# everything that links the library.
+target_compile_definitions(chopper_lib PRIVATE ${CHOPPER_LIB_DEFINITIONS})
 # MSVC exports nothing from a DLL without __declspec(dllexport); the tests link against
 # this library, so let CMake generate the export table rather than annotate every symbol.
 set_target_properties(chopper_lib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)

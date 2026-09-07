@@ -41,6 +41,15 @@
  *     -- the `beam` of the same NeXus specification. It used to have to be folded into
  *     `delay` or into every window angle by the caller; it is a field now, so a disk is
  *     described the same way here as it is in the file and in the McStas component.
+ *
+ *     A disk parked shut is a beam stop. Every disk with a `speed` of zero used to be
+ *     left out of the calculation, which is right for one parked open -- it has no
+ *     period, so it constrains nothing -- and wrong for one parked shut, which passes
+ *     nothing at any time and was reported as a band the instrument would not deliver.
+ *     The window and mask functions now empty their answer for one, as they already did
+ *     for a disk with no openings, and name it on stdout on the way past.
+ *     `chopper_parked_is_open` is the predicate they use, and says whether a disk that is
+ *     not turning stands open on the beam.
  * 3.0.0
  *     A `multi_chopper_parameters` window angle is placed with the *signed* `speed`:
  *     an opening at angle `a` is on the beam at `delay + a / (360 * speed)`. The mask
@@ -177,6 +186,27 @@ struct chopper_parameters_struct {
 typedef struct chopper_parameters_struct chopper_parameters;
 
 
+/** Whether a disk that is not turning stands open on the beam
+ *
+ * A parked disk is open or shut for good: with no speed there is no period to recur on
+ * and no delay to apply, so either `beam` is inside one of the `edges` pairs or it is on
+ * the solid part of the disk. Angles fold, so an opening written across the mark --
+ * `{350, 370}` -- and a negative `beam` both work.
+ *
+ * The window and the mask functions leave a disk parked open out of their calculation,
+ * because a disk with no period constrains no inverse velocity. One parked shut is a
+ * beam stop: they name it on stdout and return nothing at all, the same answer they give
+ * for a disk with no openings and for a train whose disks never agree. Call this first
+ * to tell that apart from a train that is merely over-constrained, or to decide what a
+ * shut disk should mean in your own terms.
+ *
+ * @param chopper The disk to test; its `speed` is not read, since a turning disk stands
+ *                open on the beam once a period whatever its angles are
+ * @return 1 if the beam crosses an opening, 0 if it crosses the disk body or the disk has
+ *         no openings at all
+ */
+int chopper_parked_is_open(chopper_parameters chopper);
+
 /** Find the possible inverse velocity window(s) that are admitted by a series of disk choppers
  *
  * @param count The number of disk choppers provided
@@ -185,6 +215,9 @@ typedef struct chopper_parameters_struct chopper_parameters;
  * @param inv_v_max The maximum inverse velocity to be considered -- how long before a neutron is no-longer interesting
  * @param latest_emission How long after time-zero can a neutron start its journey, effects minimum inverse velocities
  * @return One or more inverse velocity ranges that can pass through the chopper train as a `range_set`
+ * @note A disk parked open is left out: it has no period, so it constrains no inverse
+ *       velocity. One parked shut passes nothing at any time, so the returned set is
+ *       empty and the disk is named on stdout -- see `chopper_parked_is_open`.
  * @warning The returned value's `ranges` property is allocated in the function and must be freed at calling scope.
  */
 range_set chopper_inverse_velocity_windows(unsigned count, const chopper_parameters * choppers,
@@ -234,6 +267,8 @@ unsigned chopper_wavelength_limits(double * lower, double * upper, unsigned coun
  * @param chopper_count [in] The number of choppers provided
  * @param grow_mask [in] Expand the allowed regions by this number of bins in each direction
  * @return The number of unmasked (allowed) (inverse_velocity, time) bins
+ * @note A disk parked open is left out, as it is by the window functions; one parked
+ *       shut masks off every bin and is named on stdout -- see `chopper_parked_is_open`.
  */
 unsigned chopper_inverse_velocity_time_mask(
   int * mask, unsigned mask_inverse_velocity_count, unsigned mask_time_count,

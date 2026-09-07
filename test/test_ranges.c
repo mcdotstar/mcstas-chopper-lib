@@ -86,11 +86,36 @@ static void test_sorting_merges_what_it_can(void) {
   if (sorted.ranges && sorted.ranges != ranges) free(sorted.ranges);
 }
 
+/* An empty set sorts to itself, and nothing is dereferenced on the way.
+ *
+ * `{0, NULL}` is ordinary here, not exceptional: it is what a chopper admitting no
+ * window intersects with, and what a train that passes nothing carries from there on.
+ * Sorting it used to reach `qsort` with a null pointer, which is undefined however
+ * little there is to sort -- run this suite under UBSan to see the difference.
+ */
+static void test_sorting_an_empty_set_is_a_no_op(void) {
+  TEST("an empty set sorts to itself");
+  range_set empty = {0, NULL};
+
+  range_set sorted = range_set_sort(empty);
+
+  CHECK_EQUAL_INT(sorted.count, 0);
+  CHECK(sorted.ranges == NULL);
+
+  /* and it still intersects with a real set, to nothing */
+  range ranges[1] = {{0.0, 1.0}};
+  range_set real = {1, ranges};
+  range_set got = range_intersection(empty, real);
+  CHECK_EQUAL_INT(got.count, 0);
+  if (got.ranges && got.ranges != ranges) free(got.ranges);
+}
+
 int main(void) {
   test_overlap_classification();
   test_touching_ranges_count_as_overlapping();
   test_intersection_keeps_only_shared_spans();
   test_disjoint_sets_intersect_to_nothing();
   test_sorting_merges_what_it_can();
+  test_sorting_an_empty_set_is_a_no_op();
   return chopper_test_report();
 }

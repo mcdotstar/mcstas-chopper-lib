@@ -28,24 +28,30 @@ The latter solution forces registration of a new `USERVAR` in
 the particle structure, and a possibly-large group size;
 both of which are undesirable.
 
-## Describing a chopper
 
-A chopper is `{speed, delay, angle, path}`: how fast it turns in Hz, when an opening
-is on the beam in seconds, how wide that opening is in degrees, and how far it sits
-from the source in metres.
+## Building the C source
 
-`delay` is a time, so it says the same thing whatever the speed is and whichever way
-the disk turns — which is how a real chopper is set, and what McStas' `DiskChopper`
-acts on. Before version 2.0.0 the second field was a `phase` in degrees, which this
-library divided by `360 * fabs(speed)` to recover a delay at every point of use.
+`chopper-lib.c` needs `V2K`, `K2V` and `PI`, and defines none of them. McStas defines
+all three in its runtime, and `%include "chopper-lib"` copies the source verbatim into
+the generated instrument, so definitions of its own would land there as a second
+definition of `PI` beside McStas' -- inert behind include guards, and confusing to
+read. Every other build passes them in, and the file refuses to compile without them
+rather than quietly fall back to numbers of its own.
 
-Choppers reach the library as flat `double` arrays cast to `chopper_parameters *`, so
-that change is invisible to a compiler. Guard against it where you fill the structure:
+The CMake build does that already. A project that pulls this in with FetchContent and
+compiles `chopper-lib.c` into a target of its own, rather than linking `chopper_lib`,
+passes on the same values:
 
-```c
-#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 20000
-#error "This instrument sets chopper delays; chopper-lib 2.0.0 or newer is required"
-#endif
+```cmake
+target_compile_definitions(its_target PRIVATE ${CHOPPER_LIB_DEFINITIONS})
+```
+
+`CHOPPER_LIB_DEFINITIONS` is cached, so it is readable after `FetchContent_MakeAvailable`
+and can be overridden to match a host runtime that defines the constants differently.
+Compiling the file by hand takes the same three definitions:
+
+```shell
+cc -c chopper-lib.c -DV2K=1.58825361e-3 -DK2V=629.622368 -DPI=3.14159265358979323846
 ```
 
 ## Tests
@@ -102,6 +108,31 @@ Note the sign: `speed` is signed, and only `|speed|` sets the period. A larger a
 reaches the beam *earlier* on a disk turning forwards, so reversing a disk reflects its
 openings about `delay`. This is invisible for an opening symmetric about the mark and
 matters for every other one.
+
+A disk with a `speed` of zero is parked, and is open or shut for good: with no period to
+recur on and no delay to apply, all that decides it is whether `beam` falls inside one of
+the `edges` pairs. `chopper_parked_is_open` answers that.
+
+A disk parked open constrains nothing -- it has no period, so it passes every inverse
+velocity -- and the window and mask functions step over it. A disk parked shut is a beam
+stop, and they return nothing at all for one: no windows, no bounds written, no unmasked
+bin. That is the answer they already give for a disk with no openings and for a train
+whose disks never agree, so a caller has one empty result to handle rather than three
+special cases. What an empty result cannot say is which disk emptied it, so a disk parked
+shut is named on stdout:
+
+```
+chopper-lib: nothing gets through chopper 1, parked with the beam at 90 degrees, where
+the disk is solid; the train admits nothing.
+```
+
+Scanning a park angle is the case to think about here. At the angles where the disk
+blocks the beam there is no band to narrow a source to, and a source that is handed an
+empty one has nothing to emit -- which leaves a simulation dividing zero rays by zero
+rather than reporting zero intensity from the rays it traced. Decide that at the caller:
+either keep the last band that was not empty, or fall back to the full range being
+considered, and let the ray tracing put the intensity to zero. Optimising a source
+against a disk that blocks the beam is not a thing to do quietly.
 
 `chopper_inverse_velocity_windows` lists the openings a train passes;
 `chopper_inverse_velocity_limits` and `chopper_wavelength_limits` report the envelope of

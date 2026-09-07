@@ -35,8 +35,9 @@ static const double DELAY = 0.02;    /* s, when the angle `beam` is on the beam 
 static const double IV_MIN = 0.0005; /* s/m */
 static const double IV_MAX = 0.01;   /* s/m */
 
-/* chopper-lib.c defines these privately for its wavelength wrappers; a test of a unit
- * conversion has to name the units it expects, so repeat them here rather than infer. */
+/* The build passes these to chopper-lib.c as CHOPPER_LIB_DEFINITIONS, and McStas
+ * supplies its own; a test of a unit conversion has to name the units it expects, so
+ * repeat them here rather than take whatever the library was compiled with. */
 #define TEST_V2K 1.58825361e-3
 #define TEST_K2V 629.622368
 #define TEST_PI 3.14159265358979323846
@@ -349,9 +350,188 @@ static void test_the_mask_agrees_with_the_window_list(void) {
   }
 }
 
+/* The mask moves with the delay, and repeats after exactly one period.
+ *
+ * `delay` says when the angle `beam` is on the beam path, so every window the mask
+ * admits is fixed to it, and the openings recur every `1/|speed|` -- a delay a whole
+ * period on describes the same disk and has to give the same mask back.
+ *
+ * Both halves are worth pinning here rather than leaving to the window list, which the
+ * mask is only cross-checked against at one delay. Folding the delay into
+ * `chopper_edge_time` left each of the two public functions binding `t0 = delay` and
+ * never reading it again, which reads exactly like a mask that has stopped placing its
+ * openings in time at all. Nothing in the suite said otherwise.
+ */
+static void test_the_mask_follows_the_delay(void) {
+  TEST("the time mask moves with the delay and repeats after one period");
+  double edges[2] = {-5.0, 5.0};      /* one opening, symmetric about the mark */
+  const double tau = 1.0 / SPEED;
+  /* the mask is generous by up to a bin at each end of a run, as above */
+  const double tolerance = 3.0 * IV_MAX / 200000.0;
+
+  /* A quarter period at a time across one whole turn. The opening is on the mark, so
+   * it is on the beam path at `delay` itself, and every period from there: the mask
+   * has to admit `delay / path`, and nothing that is not a whole number of turns from
+   * it. A mask that ignored the delay would put its comb on the turns alone, which
+   * DELAY -- 0.28 of a period -- is not on. */
+  for (int q = 0; q < 4; ++q) {
+    const double delay = DELAY + (double) q * tau / 4.0;
+    const chopper_parameters disk = {
+      .speed = SPEED, .delay = delay, .beam = 0.0,
+      .edge_count = 2, .edges = edges, .path = PATH};
+    range runs[8];
+    const unsigned found = mask_runs(&disk, runs, 8);
+
+    CHECK(found > 0);
+    int admits_the_delay = 0;
+    for (unsigned w = 0; w < found && w < 8; ++w) {
+      const double centre = centre_of(runs[w]);
+      if (fabs(centre - delay / PATH) <= tolerance) admits_the_delay = 1;
+      /* and every window it does admit is a whole number of turns from that one */
+      const double turns = (centre * PATH - delay) / tau;
+      CHECK_CLOSE(turns, round(turns), tolerance * PATH / tau);
+    }
+    CHECK(admits_the_delay);
+  }
+
+  /* One period on is the same disk, bin for bin. */
+  const chopper_parameters early = {
+    .speed = SPEED, .delay = DELAY, .beam = 0.0,
+    .edge_count = 2, .edges = edges, .path = PATH};
+  const chopper_parameters late = {
+    .speed = SPEED, .delay = DELAY + tau, .beam = 0.0,
+    .edge_count = 2, .edges = edges, .path = PATH};
+  range early_runs[8], late_runs[8];
+  const unsigned early_found = mask_runs(&early, early_runs, 8);
+  const unsigned late_found = mask_runs(&late, late_runs, 8);
+
+  CHECK(early_found > 0);
+  CHECK_EQUAL_INT(late_found, early_found);
+  if (late_found == early_found) {
+    for (unsigned w = 0; w < early_found && w < 8; ++w) {
+      CHECK_CLOSE(late_runs[w].minimum, early_runs[w].minimum, tolerance);
+      CHECK_CLOSE(late_runs[w].maximum, early_runs[w].maximum, tolerance);
+    }
+  }
+}
+
 /* ---------------------------------------------------------------------------------
  * Trains, envelopes and wavelengths.
  * ------------------------------------------------------------------------------- */
+
+/* A parked disk is open or shut, and which one is a question about its angles.
+ *
+ * With no speed there is no period to recur on and no delay to apply, so all that is
+ * left is whether the beam crosses an opening. Angles fold, which is what lets an
+ * opening be written across the mark and a beam angle be given negative.
+ */
+static void test_a_parked_disk_is_open_only_when_the_beam_is_in_an_opening(void) {
+  TEST("a parked disk stands open only when the beam crosses one of its openings");
+  double edges[4] = {0.0, 10.0, 100.0, 104.0};
+  double across_the_mark[2] = {350.0, 370.0};
+  double about_the_mark[2] = {-85.0, 85.0};
+
+  const chopper_parameters in_the_first = {
+    .speed = 0.0, .delay = DELAY, .beam = 5.0, .edge_count = 4, .edges = edges, .path = PATH};
+  const chopper_parameters in_the_second = {
+    .speed = 0.0, .delay = DELAY, .beam = 102.0, .edge_count = 4, .edges = edges, .path = PATH};
+  const chopper_parameters on_the_body = {
+    .speed = 0.0, .delay = DELAY, .beam = 50.0, .edge_count = 4, .edges = edges, .path = PATH};
+  /* on an edge: the opening runs from its first edge, and stops short of its last */
+  const chopper_parameters on_the_opening_edge = {
+    .speed = 0.0, .delay = DELAY, .beam = 0.0, .edge_count = 4, .edges = edges, .path = PATH};
+  const chopper_parameters on_the_closing_edge = {
+    .speed = 0.0, .delay = DELAY, .beam = 10.0, .edge_count = 4, .edges = edges, .path = PATH};
+  /* an opening written across the mark, reached from either side of it */
+  const chopper_parameters past_the_mark = {
+    .speed = 0.0, .delay = DELAY, .beam = 5.0, .edge_count = 2, .edges = across_the_mark, .path = PATH};
+  const chopper_parameters before_the_mark = {
+    .speed = 0.0, .delay = DELAY, .beam = 355.0, .edge_count = 2, .edges = across_the_mark, .path = PATH};
+  const chopper_parameters opposite_the_mark = {
+    .speed = 0.0, .delay = DELAY, .beam = 180.0, .edge_count = 2, .edges = across_the_mark, .path = PATH};
+  /* and one written about the mark with negative angles, which this library allows */
+  const chopper_parameters inside_a_negative_opening = {
+    .speed = 0.0, .delay = DELAY, .beam = -80.0, .edge_count = 2, .edges = about_the_mark, .path = PATH};
+  const chopper_parameters outside_a_negative_opening = {
+    .speed = 0.0, .delay = DELAY, .beam = 100.0, .edge_count = 2, .edges = about_the_mark, .path = PATH};
+  /* a disk with no openings is solid, so it is shut wherever the beam crosses it */
+  const chopper_parameters no_openings = {
+    .speed = 0.0, .delay = DELAY, .beam = 0.0, .edge_count = 0, .edges = NULL, .path = PATH};
+
+  CHECK_EQUAL_INT(chopper_parked_is_open(in_the_first), 1);
+  CHECK_EQUAL_INT(chopper_parked_is_open(in_the_second), 1);
+  CHECK_EQUAL_INT(chopper_parked_is_open(on_the_body), 0);
+  CHECK_EQUAL_INT(chopper_parked_is_open(on_the_opening_edge), 1);
+  CHECK_EQUAL_INT(chopper_parked_is_open(on_the_closing_edge), 0);
+  CHECK_EQUAL_INT(chopper_parked_is_open(past_the_mark), 1);
+  CHECK_EQUAL_INT(chopper_parked_is_open(before_the_mark), 1);
+  CHECK_EQUAL_INT(chopper_parked_is_open(opposite_the_mark), 0);
+  CHECK_EQUAL_INT(chopper_parked_is_open(inside_a_negative_opening), 1);
+  CHECK_EQUAL_INT(chopper_parked_is_open(outside_a_negative_opening), 0);
+  CHECK_EQUAL_INT(chopper_parked_is_open(no_openings), 0);
+}
+
+/* A disk parked shut empties the answer, and says which disk did it.
+ *
+ * It is a beam stop: nothing gets past it at any time, so the train admits no inverse
+ * velocity and its mask has no open bin. That is the same answer a disk with no openings
+ * gives, and the same one a train whose disks never agree gives, which is what makes it
+ * the consistent one -- a caller already has to handle an empty result from either.
+ *
+ * What an empty result cannot say is *which* disk emptied it, and a disk parked shut is
+ * nearly always one left mis-set. Hence the message, which names it. Watch for it in the
+ * log; the checks here are on the answer, which is the part with a value to compare.
+ */
+static void test_a_disk_parked_shut_blocks_the_whole_train(void) {
+  TEST("a disk parked with the beam on its body passes nothing, and is named");
+  double edges[2] = {-2.0, 2.0};
+  const chopper_parameters train[2] = {
+    {.speed = SPEED, .delay = DELAY, .beam = 0.0, .edge_count = 2, .edges = edges, .path = PATH},
+    /* parked with the beam a quarter turn from its only opening */
+    {.speed = 0.0, .delay = DELAY, .beam = 90.0, .edge_count = 2, .edges = edges, .path = PATH},
+  };
+  CHECK_EQUAL_INT(chopper_parked_is_open(train[1]), 0);
+
+  /* the turning disk on its own admits something, so the shut one is what empties it */
+  range_set turning = chopper_inverse_velocity_windows(1, train, IV_MIN, IV_MAX, 0.0);
+  range_set with_shut = chopper_inverse_velocity_windows(2, train, IV_MIN, IV_MAX, 0.0);
+  CHECK(turning.count > 0);
+  CHECK_EQUAL_INT(with_shut.count, 0);
+  if (turning.ranges) free(turning.ranges);
+  if (with_shut.ranges) free(with_shut.ranges);
+
+  /* the envelope reports nothing and leaves the bounds alone, as it does for any train
+   * that passes nothing -- the contract a caller already has to handle */
+  double lower = -1.0, upper = -1.0;
+  const unsigned count = chopper_inverse_velocity_limits(
+    &lower, &upper, 2, train, IV_MIN, IV_MAX, 0.0);
+  CHECK_EQUAL_INT(count, 0);
+  CHECK_CLOSE(lower, -1.0, 0.0);
+  CHECK_CLOSE(upper, -1.0, 0.0);
+
+  /* and the mask masks off every bin, which is what the beam stop path does */
+  const unsigned bins = 2000;
+  double * grid = calloc(bins + 1, sizeof(double));
+  int * alone = calloc(bins, sizeof(int));
+  int * with_shut_mask = calloc(bins, sizeof(int));
+  for (unsigned i = 0; i <= bins; ++i) grid[i] = IV_MAX * (double) i / (double) bins;
+  const double times[2] = {0.0, 1.0e-12};
+
+  const unsigned open_alone = chopper_inverse_velocity_time_mask(
+    alone, bins, 1, grid, bins + 1, times, 2, train, 1, 0);
+  const unsigned open_with_shut = chopper_inverse_velocity_time_mask(
+    with_shut_mask, bins, 1, grid, bins + 1, times, 2, train, 2, 0);
+
+  CHECK(open_alone > 0);
+  CHECK_EQUAL_INT(open_with_shut, 0);
+  int every_bin_masked = 1;
+  for (unsigned i = 0; i < bins; ++i) if (with_shut_mask[i] == CHOPPER_MASK_INCLUDED) every_bin_masked = 0;
+  CHECK(every_bin_masked);
+
+  free(grid);
+  free(alone);
+  free(with_shut_mask);
+}
 
 /* Two openings offer twice as many chances to pass; a second disk takes half of them back.
  *
@@ -386,9 +566,13 @@ static void test_a_train_keeps_only_the_openings_every_disk_admits(void) {
   if (both.ranges) free(both.ranges);
 }
 
-/* A stationary disk is not a closed one: the window functions step over it. */
-static void test_a_stationary_disk_is_ignored(void) {
-  TEST("a disk that is not turning does not block anything");
+/* A disk parked open is not a closed one: the window functions step over it.
+ *
+ * Its opening is on the beam and stays there, so it passes every inverse velocity and
+ * constrains nothing. A disk parked *shut* is the opposite of that, and is tested below.
+ */
+static void test_a_disk_parked_open_is_ignored(void) {
+  TEST("a disk parked open does not block anything");
   double edges[2] = {-2.0, 2.0};
   const chopper_parameters train[2] = {
     {.speed = SPEED, .delay = DELAY, .beam = 0.0, .edge_count = 2, .edges = edges, .path = PATH},
@@ -551,8 +735,11 @@ int main(void) {
   test_openings_are_consecutive_pairs_in_increasing_order();
   test_reversing_the_disk_reflects_asymmetric_openings();
   test_the_mask_agrees_with_the_window_list();
+  test_the_mask_follows_the_delay();
   test_a_train_keeps_only_the_openings_every_disk_admits();
-  test_a_stationary_disk_is_ignored();
+  test_a_disk_parked_open_is_ignored();
+  test_a_parked_disk_is_open_only_when_the_beam_is_in_an_opening();
+  test_a_disk_parked_shut_blocks_the_whole_train();
   test_the_envelope_spans_the_outermost_windows();
   test_a_train_that_admits_nothing_reports_nothing();
   test_wavelength_limits_are_the_inverse_velocity_limits_converted();

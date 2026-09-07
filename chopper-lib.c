@@ -14,8 +14,6 @@
 extern "C" {
 #endif
 
-
-
 /******************************** range functions ************************************/
 void range_sort(range a){
   if (a.maximum < a.minimum){
@@ -42,11 +40,16 @@ int compare_ranges(const range * a, const range * b){
   return 0;
 }
 // This gateway function is used along with qsort, which handles only void pointers
-int compare_sorted_ranges(const void * ptr_a, const void * ptr_b){
+static int compare_sorted_ranges(const void * ptr_a, const void * ptr_b){
   return compare_ranges((range *) ptr_a, (range *) ptr_b);
 }
 /******************************** range_set functions ************************************/
 range_set range_set_sort(range_set s){
+  // An empty set is already sorted, and qsort may not be handed a null pointer even for
+  // nothing to sort. A set with no ranges is ordinary here rather than exceptional: it is
+  // what a chopper admitting no window intersects with, and what a train that passes
+  // nothing carries from there on.
+  if (s.count == 0 || s.ranges == NULL) return s;
   // sort all sub-ranges:
   for (unsigned i=0; i<s.count; ++i) range_sort(s.ranges[i]);
   // sort the sub-ranges by minimum
@@ -80,7 +83,7 @@ range_set range_set_sort(range_set s){
   }
 }
 
-int range_intersects_ranges(const range r, const range_set rs){
+static int range_intersects_ranges(const range r, const range_set rs){
   for (unsigned i=0; i<rs.count; ++i){
     if (classify_range_overlap(&r, rs.ranges + i) != 0) return 1;
   }
@@ -159,22 +162,6 @@ range_set range_intersection(const range_set ain, const range_set bin){
   return out;
 }
 
-/********************** local helper functions *************************/
-// void print_help(const char * program_name) {
-//   printf("Usage: %s [parameter name]=value ...\n", program_name);
-//   printf("\tValid parameter names: xxNtype for xx in (ps, fo, bw), N in (1, 2), and type in (speed, delay)\n");
-//   exit(0);
-// }
-//
-// void print_one(const char * name, const double value) {
-//   printf("  %s = %+10.4f\n", name, value);
-// }
-/*
- * toff=fabs(t-atan2(x,yprime)/omega - delay - (jitter ? jitter*randnorm():0));
-   // does neutron hit outside slit? *
-   if (fmod(toff+To/2.0,Tg)>To) ABSORB;
- */
-
 /****************** chopper train functionality ************************/
 /** When a disk edge at angle `a` is on the beam, ignoring which rotation.
  *
@@ -188,6 +175,40 @@ static double chopper_edge_time(const chopper_parameters chopper, const double a
   return chopper.delay + (chopper.beam - a) / 360.0 / chopper.speed;
 }
 
+/** Whether a disk that is not turning stands open on the beam.
+ *
+ * A parked disk is open or shut for good. The beam crosses it at `beam`, the openings
+ * span `edges` in the same frame, and with no speed there is no period and no delay to
+ * apply: either that angle is inside an opening or it is on the solid part of the disk.
+ * Which one decides whether the disk drops out of a calculation or empties it.
+ */
+int chopper_parked_is_open(const chopper_parameters chopper) {
+  if (chopper.edge_count < 2 || chopper.edges == NULL) return 0;
+  for (unsigned i = 0; i + 1 < chopper.edge_count; i += 2) {
+    const double width = chopper.edges[i + 1] - chopper.edges[i];
+    // measured from this opening's first edge, so an opening written across the mark --
+    // {350, 370} -- needs no special case, and neither does a negative `beam`
+    double from_edge = fmod(chopper.beam - chopper.edges[i], 360.0);
+    if (from_edge < 0) from_edge += 360.0;
+    if (from_edge < width) return 1;
+  }
+  return 0;
+}
+
+/** Name the disk that emptied the answer.
+ *
+ * A disk parked shut is a beam stop, and the answer either function can give for one is
+ * empty -- the same answer an over-constrained train gives, and the same one a disk with
+ * no openings gives. An empty range set says nothing about which disk emptied it, and a
+ * disk parked shut is nearly always one left mis-set rather than the question being
+ * asked, so say which one it was and why.
+ */
+static void chopper_report_parked_shut(const chopper_parameters chopper, const unsigned index) {
+  printf("chopper-lib: nothing gets through chopper %u, parked with the beam at %g "
+         "degrees, where the disk is solid; the train admits nothing.\n",
+         index, chopper.beam);
+}
+
 range_set chopper_inverse_velocity_windows(const unsigned count, const chopper_parameters * choppers,
                                            const double inv_v_min, const double inv_v_max,
                                            const double latest_emission){
@@ -197,10 +218,20 @@ range_set chopper_inverse_velocity_windows(const unsigned count, const chopper_p
   limits.ranges[0].minimum = inv_v_min;
   limits.ranges[0].maximum = inv_v_max;
 
-  for (unsigned i=0; i<count && limits.count; ++i) if (choppers[i].speed) {
+  for (unsigned i=0; i<count && limits.count; ++i) {
+    // A disk that is not turning has no period, so it admits every time or none. Parked
+    // open it constrains nothing and drops out; parked shut it is a beam stop, exactly
+    // like a disk with no openings at all, and no other disk can undo that.
+    if (choppers[i].speed == 0.0) {
+      if (chopper_parked_is_open(choppers[i])) continue;
+      chopper_report_parked_shut(choppers[i], i);
+      if (limits.ranges) free(limits.ranges);
+      limits.count = 0;
+      limits.ranges = NULL;
+      break;
+    }
     // the period of the chopper is a positive time
     const double tau = 1.0 / fabs(choppers[i].speed);
-    const double t0 = choppers[i].delay;
     const double path = choppers[i].path;
     const unsigned opening_count = choppers[i].edge_count / 2;
     // allocate open and close time arrays for the openings to avoid the same calculation twice
@@ -256,7 +287,7 @@ range_set chopper_inverse_velocity_windows(const unsigned count, const chopper_p
     free(t_open);
     free(t_close);
     // find the intersection of this chopper with the running set
-    range_set new_limits = range_intersection(limits, ith);
+    const range_set new_limits = range_intersection(limits, ith);
     // clean-up allocated memory, ensuring limits or ith is not erased if transferred to new_limits:
     if ((!new_limits.count || new_limits.ranges != limits.ranges) && limits.ranges)  free(limits.ranges);
     if ((!new_limits.count || new_limits.ranges != ith.ranges) && ith.ranges) free(ith.ranges);
@@ -278,16 +309,14 @@ unsigned chopper_inverse_velocity_limits(double * lower, double * upper,
   return limits.count;
 }
 
-// McStas defines these in its runtime; the library is also built standalone for its
-// tests, where nothing else supplies them.
-#ifndef V2K
-#define V2K 1.58825361e-3     /* Convert v[m/s] to k[1/AA] */
-#endif
-#ifndef K2V
-#define K2V 629.622368        /* Convert k[1/AA] to v[m/s] */
-#endif
-#ifndef PI
-#define PI 3.14159265358979323846
+// V2K, K2V and PI come from whatever is compiling this. McStas defines all three in
+// its runtime, and this file is copied verbatim into every instrument that
+// %includes it, so defining them here would put a second definition of PI in the
+// generated C. Every other build passes them in instead -- CMake does it with
+// CHOPPER_LIB_DEFINITIONS, which the README spells out for a consumer that compiles
+// this source into a target of its own rather than linking the library.
+#if !defined(V2K) || !defined(K2V) || !defined(PI)
+#error "chopper-lib.c needs V2K, K2V and PI defined; build it with CHOPPER_LIB_DEFINITIONS or inside McStas"
 #endif
 
 unsigned chopper_wavelength_limits(double * lower, double * upper,
@@ -364,9 +393,16 @@ unsigned chopper_inverse_velocity_time_mask(
   for (unsigned i = 0; i < time_edges_count; ++i) time_edges[i] = 1;
 
   for (unsigned ci = 0; ci < chopper_count; ++ci) {
-    // A stationary disk has no period to speak of; the window functions skip it rather
-    // than dividing by zero, so do the same here.
-    if (choppers[ci].speed == 0.0) continue;
+    // A stationary disk has no period to speak of; the window functions skip one parked
+    // open rather than dividing by zero, so do the same here. One parked shut takes the
+    // beam stop path below, which is what it is.
+    if (choppers[ci].speed == 0.0) {
+      if (chopper_parked_is_open(choppers[ci])) continue;
+      chopper_report_parked_shut(choppers[ci], ci);
+      memset(inverse_velocity_edges, 0, inverse_velocity_edges_count * sizeof(int));
+      memset(time_edges, 0, time_edges_count * sizeof(int));
+      break; // nothing any other chopper does can let a neutron back through
+    }
     // A disk with no openings is a beam stop rather than an absent chopper, which is what
     // the window functions report for the same chopper: their range set comes back empty.
     if (choppers[ci].edge_count < 2 || choppers[ci].edges == NULL) {
@@ -375,7 +411,6 @@ unsigned chopper_inverse_velocity_time_mask(
       break; // nothing any other chopper does can let a neutron back through
     }
     const double tau = 1.0 / fabs(choppers[ci].speed);
-    const double t0 = choppers[ci].delay;
     const range time_range = {
       .minimum = times[0] + choppers[ci].path * inverse_velocities[0],
       .maximum = times[time_count - 1] + choppers[ci].path * inverse_velocities[inverse_velocity_count - 1]
@@ -505,7 +540,7 @@ double chopper_unmasked_probability(
   return total_signal ? unmasked_signal / total_signal : 0.0;
 }
 
-void chopper_write_axes_to_file(FILE * file,
+static void chopper_write_axes_to_file(FILE * file,
     const double * inverse_velocities, const unsigned inverse_velocity_count,
     const double * times, const unsigned time_count) {
   if (inverse_velocities && inverse_velocity_count) {
@@ -524,13 +559,13 @@ void chopper_write_axes_to_file(FILE * file,
   }
 }
 
-FILE * chopper_open_file_for_writing(
+static FILE * chopper_open_file_for_writing(
   const char * directory, const char * filename, const char * extension, const char * path_sep
   ){
-  unsigned dlen = directory ? strlen(directory) : 0;
-  unsigned plen = path_sep ? strlen(path_sep) : 0;
-  unsigned flen = filename ? strlen(filename) : 0;
-  unsigned elen = extension ? strlen(extension) : 0;
+  const unsigned dlen = directory ? strlen(directory) : 0;
+  const unsigned plen = path_sep ? strlen(path_sep) : 0;
+  const unsigned flen = filename ? strlen(filename) : 0;
+  const unsigned elen = extension ? strlen(extension) : 0;
   char * filepath = calloc(dlen + plen + flen + elen + 1, sizeof(char));
   int dp = 0, fp = 0;
   if (directory && dlen) {
