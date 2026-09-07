@@ -11,6 +11,9 @@ checkable by looking at a picture:
   - a parked disc and a turning one showing the same face give the same image. Those are
     separate branches of the component's TRACE -- `park_angle` against
     `omega * (t - delay)` -- and nothing else in the repository makes them meet.
+  - a beam window `slit_width` across is open over its whole width. An opening is an
+    annular sector and a window is a rectangle, and they only fit if the openings are hung
+    from the rim's height at the edge of the window rather than on its axis.
 
 The source rasters one ray per pixel onto the PSD's own grid, so every assertion here is
 on a noiseless image: `N == I` everywhere, and the second test can demand equality pixel
@@ -128,6 +131,66 @@ def test_a_parked_disc_and_a_turning_one_show_the_same_face(shadow):
     # agreeing: a disc turned somewhere else does not match
     elsewhere = _values(shadow(nu=nu, delay=-(park + 20.0) / (360.0 * nu)))
     assert not np.array_equal(parked, elsewhere)
+
+
+def test_a_beam_window_is_lit_corner_to_corner(shadow):
+    """A window `slit_width` across is open over its whole width, corners included.
+
+    An opening is an annular sector and a window is a rectangle, so the two only fit if
+    the openings hang from the rim's height *at the edge of the window* --
+    `sqrt(radius^2 - (slit_width/2)^2)` -- rather than from the radius, which is only
+    where the rim stands on the axis. Hung from the radius, a window's top corners are
+    outside the disc: with `abs_out = 1` they are absorbed and the corners of the picture
+    go dark, and with `abs_out = 0` they are worse than dark, passing unchopped.
+
+    The window here is small enough to sit well inside the 60 degree opening, so nothing
+    but the disc's own geometry decides what is lit, and `park` puts it there: an opening
+    at disc angle `a` appears at `a + park` round from +y.
+    """
+    # A wide window on purpose: the rim drops by `slit_width^2 / (8 radius)` across it,
+    # which has to be worth more than a pixel or the picture cannot show the difference.
+    # 0.2 m on this disc is 14 mm, five pixels, where 0.05 m would be a third of one.
+    width, height = 0.20, 0.10
+    park = 80.0        # 280 - 360: the middle of the 250..310 opening, on the +y axis
+    counts = _values(shadow(park=park, slit_width=width, slit_height=height))
+
+    # The image is centred on the spindle, so a pixel's own coordinates are its position
+    # on the disc. Both axes span the field; the PSD's rows are y and its columns x.
+    edges = np.linspace(-FIELD / 2, FIELD / 2, counts.shape[0] + 1)
+    middles = (edges[:-1] + edges[1:]) / 2
+    x, y = np.meshgrid(middles, middles)
+    pixel = FIELD / counts.shape[0]
+
+    reach = math.sqrt(RADIUS ** 2 - (width / 2) ** 2)   # the rim at the window's edge
+    inner = reach - height                              # and the hub below it
+
+    # what the component should have let through: inside the window, between the hub and
+    # the rim, and in one of the openings -- `atan2(x, y)` being the disc's own angle
+    radius = np.hypot(x, y)
+    on_disc = (np.degrees(np.arctan2(x, y)) - park) % 360.0
+    in_opening = np.zeros(counts.shape, dtype=bool)
+    for low, high in OPENINGS:
+        in_opening |= ((on_disc - low) % 360.0) < (high - low)
+    expected = (np.abs(x) <= width / 2) & (radius >= inner) & (radius <= RADIUS) & in_opening
+
+    assert expected.sum() > 0                       # an empty prediction proves nothing
+
+    # the whole window, corner to corner: every pixel of the rectangle it cuts is lit.
+    # Inset by a pixel, since a pixel straddling an edge is neither in nor out.
+    window = ((np.abs(x) <= width / 2 - pixel) & (y >= inner + pixel) & (y <= reach - pixel))
+    assert window.sum() > 100                       # enough pixels for this to mean much
+    assert counts[window].min() == 1                # ... and not one of them dark
+
+    # and away from the boundary, the picture is that prediction exactly. A pixel the
+    # boundary passes through is lit or not by where its centre fell, so leave those out.
+    boundary = np.zeros(counts.shape, dtype=bool)
+    for axis in (0, 1):
+        for step in (-1, 1):
+            boundary |= expected ^ np.roll(expected, step, axis=axis)
+    assert not (((counts > 0) != expected) & ~boundary).any()
+
+    # nothing outside the window survives, whichever side of the disc it is on
+    assert counts[np.abs(x) > width / 2 + pixel].sum() == 0
 
 
 # tell pytest to skip the module's tests together when there is nothing to compile with

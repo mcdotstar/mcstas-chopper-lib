@@ -63,7 +63,8 @@
 * beam_angle: [deg] where the beam crosses the disc, from the zero mark
 * zero_angle: [deg] from +y to the top-dead-centre pickup
 * disc_radius: [m] outer radius of the disc
-* slit_height: [m] radial height of the openings, so the hub is disc_radius - slit_height
+* slit_height: [m] radial clearance of the openings across the whole window
+* slit_width: [m]  width of the beam window on the disc; 0 leaves the openings unrestricted
 * lambda: [AA]    wavelength of the illuminating field
 * field: [m]      side of the square illuminated area and of the PSD
 * npix: [1]       pixels per side of the PSD, and rays per side of the raster
@@ -78,6 +79,7 @@ DEFINE INSTRUMENT NXdisk_chopper_image(
   zero_angle = 0,
   disc_radius = 0.35,
   slit_height = 0.30,
+  slit_width = 0,
   lambda = 2.0,
   field = 0.72,
   int npix = 512
@@ -107,8 +109,14 @@ edges[8] = 250;  edges[9] = 310;   /* 60 deg */
 /* Where the spindle is, repeated from the component so the source and the PSD can
  * be centred on the disc rather than on the beam crossing the component marks.
  * Without this the disc sits off to one side of the image, and moves whenever
- * beam_angle or zero_angle changes. */
-delta_y = disc_radius - slit_height / 2.0;
+ * beam_angle or zero_angle changes.
+ *
+ * The square root is the component's own: a beam window `slit_width` across meets the
+ * rim where it has already dropped to sqrt(radius^2 - (slit_width/2)^2), and that is
+ * where the openings hang from, so the spindle sits a sagitta closer to the beam than
+ * `disc_radius - slit_height/2` would put it. With no window the two agree. */
+delta_y = sqrt(disc_radius * disc_radius - slit_width * slit_width / 4.0)
+        - slit_height / 2.0;
 spindle_x = -delta_y * sin(DEG2RAD * (zero_angle + beam_angle));
 spindle_y = -delta_y * cos(DEG2RAD * (zero_angle + beam_angle));
 
@@ -160,7 +168,7 @@ EXTEND
  * is at the axis while the disc it carries hangs off to one side of it. */
 COMPONENT chopper = NXdisk_chopper(
   slit_edges = edges, n_edges = 10,
-  radius = disc_radius, yheight = slit_height,
+  radius = disc_radius, yheight = slit_height, xwidth = slit_width,
   nu = nu, delay = delay, park_angle = park,
   beam_angle = beam_angle, zero_angle = zero_angle,
   abs_out = 1, verbose = 2
