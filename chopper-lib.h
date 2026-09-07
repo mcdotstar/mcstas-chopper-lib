@@ -42,6 +42,11 @@
  *     `delay` or into every window angle by the caller; it is a field now, so a disk is
  *     described the same way here as it is in the file and in the McStas component.
  *
+ *     `chopper_parameters` ends with an `aperture`: the angular width of the beam on the
+ *     disk, in degrees, which widens every window it computes by half of it at each end.
+ *     It is the last field, so a caller filling the structure positionally without one
+ *     still compiles and still describes the point beam it described before.
+ *
  *     A disk parked shut is a beam stop. Every disk with a `speed` of zero used to be
  *     left out of the calculation, which is right for one parked open -- it has no
  *     period, so it constrains nothing -- and wrong for one parked shut, which passes
@@ -144,6 +149,7 @@ range_set range_intersection(range_set ain, range_set bin);
  * @param edge_count The number of entries in `edges`: two per opening, so always even
  * @param edges The opening and closing edge of each opening, in degrees from the zero mark
  * @param path The path length from the 'zero'-time source to the disk position, in meters
+ * @param aperture The angular width of the beam where it crosses the disk, in degrees
  *
  * `edges` is the `slit_edges` of the NeXus NXdisk_chopper specification, and what McStas'
  * `CollectorDiskChopper` takes: an even number of angles measured from the top-dead-centre
@@ -174,6 +180,36 @@ range_set range_intersection(range_set ain, range_set bin);
  *
  * A disk of `n` identical, evenly spaced openings may be described as one opening turning
  * `n` times as fast, if that is more convenient; `delay` is unaffected by the substitution.
+ *
+ * Every other field describes a beam of no width: one ray, crossing the disk at the single
+ * angle `beam`. A real beam covers a range of angles, because an opening is angular and the
+ * beam is not -- a neutron that crosses `w` metres to one side of the beam centre reaches
+ * the same opening edge `w / d` radians early or late, where `d` is the distance from the
+ * spindle to the beam. `aperture` is the width of that range in degrees, so an opening is
+ * open half of it either side of the times the edges alone would give. Zero, the value a
+ * caller that does not set it leaves behind, is the point beam the rest of the fields
+ * describe.
+ *
+ * It is an angle rather than a width in metres because that is what the disk sees, and
+ * because this library holds no disk geometry to convert one into the other with. The
+ * conversion is not a division either, because a beam window has height as well as width:
+ * its corners are further round the disk than its edges are, and its *inner* corners --
+ * nearest the spindle, where a given width is the largest angle -- are the furthest of
+ * all. For a disk of `radius` whose openings clear a window `xwidth` wide by `yheight`
+ * radially, described the way the NeXus standard and McStas' NXdisk_chopper describe one,
+ * the rim has dropped to `sqrt(radius^2 - (xwidth/2)^2)` at the edge of the window, so the
+ * openings reach in to that less `yheight`, and
+ *
+ *     aperture = 2 * 180 / pi * atan2(xwidth / 2, sqrt(radius^2 - (xwidth/2)^2) - yheight)
+ *
+ * Taking the width over the radius of the beam crossing instead, `xwidth / (radius -
+ * yheight/2)`, misses both corrections and comes out low -- 12.7 degrees where the real
+ * figure is 14.4, for a 100 mm window on a 0.5 m disk with 100 mm openings.
+ *
+ * A wider aperture opens each window in time, and only in time -- nothing about a wide beam
+ * changes a neutron's wavelength -- which is what makes it the right place to account for
+ * the width. Growing a finished mask by whole bins does the same job in both directions at
+ * once, and admits inverse velocities no disk ever passes.
  */
 struct chopper_parameters_struct {
   double speed; // rotation frequency in Hz
@@ -182,6 +218,7 @@ struct chopper_parameters_struct {
   unsigned edge_count; // number of entries in edges, two per opening
   double * edges; // opening and closing edge of each opening, in degrees from the mark
   double path; // average(?) path length from source to this chopper in meters
+  double aperture; // angular width of the beam on the disk, in degrees; 0 is a point
 };
 typedef struct chopper_parameters_struct chopper_parameters;
 

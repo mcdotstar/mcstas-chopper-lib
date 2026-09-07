@@ -175,6 +175,19 @@ static double chopper_edge_time(const chopper_parameters chopper, const double a
   return chopper.delay + (chopper.beam - a) / 360.0 / chopper.speed;
 }
 
+/** How long before and after those times a beam of finite width is still in the opening.
+ *
+ * An opening is angular and a beam is not. A neutron crossing the disk to one side of the
+ * beam centre meets an edge before or after one crossing at the centre does, by the angle
+ * between them over the rate the disk turns. Half the aperture either side of every edge
+ * time is the whole of it, and it keeps the sign of nothing: a disk turning backwards is
+ * as wide as one turning forwards, so the period, not the signed speed, sets the scale.
+ */
+static double chopper_aperture_time(const chopper_parameters chopper) {
+  if (chopper.aperture <= 0 || chopper.speed == 0) return 0.0;
+  return chopper.aperture / 2.0 / 360.0 / fabs(chopper.speed);
+}
+
 /** Whether a disk that is not turning stands open on the beam.
  *
  * A parked disk is open or shut for good. The beam crosses it at `beam`, the openings
@@ -233,6 +246,7 @@ range_set chopper_inverse_velocity_windows(const unsigned count, const chopper_p
     // the period of the chopper is a positive time
     const double tau = 1.0 / fabs(choppers[i].speed);
     const double path = choppers[i].path;
+    const double aperture = chopper_aperture_time(choppers[i]);
     const unsigned opening_count = choppers[i].edge_count / 2;
     // allocate open and close time arrays for the openings to avoid the same calculation twice
     double * t_open = (double *) calloc(opening_count, sizeof(double));
@@ -249,6 +263,9 @@ range_set chopper_inverse_velocity_windows(const unsigned count, const chopper_p
         t_open[opening] = t_close[opening];
         t_close[opening] = tmp;
       }
+      // and a beam of finite width reaches the opening early and leaves it late
+      t_open[opening] -= aperture;
+      t_close[opening] += aperture;
       const int n_j_min = (int) floor((path * inv_v_min - t_open[opening]) / tau);
       const int n_j_max = (int) ceil((path * inv_v_max - t_close[opening]) / tau);
       if (first || n_j_min < n_min) n_min = n_j_min;
@@ -355,6 +372,11 @@ static int_range chopper_rotation_limits(const chopper_parameters chopper, const
     lowest = highest;
     highest = tmp;
   }
+  // a beam of finite width opens the disk earlier and closes it later, in the same
+  // rotations, so the extent it can cover is that much wider at both ends
+  const double aperture = chopper_aperture_time(chopper) / tau;
+  lowest -= aperture;
+  highest += aperture;
   // find the number of rotations needed to place the latest angle _before_ the earliest time:
   rotations.minimum = (int) floor((time_range.minimum - t0) / tau - highest) - 1;
   // and the number of rotations needed to place the earliest angle _after_ the latest time:
@@ -411,6 +433,7 @@ unsigned chopper_inverse_velocity_time_mask(
       break; // nothing any other chopper does can let a neutron back through
     }
     const double tau = 1.0 / fabs(choppers[ci].speed);
+    const double aperture = chopper_aperture_time(choppers[ci]);
     const range time_range = {
       .minimum = times[0] + choppers[ci].path * inverse_velocities[0],
       .maximum = times[time_count - 1] + choppers[ci].path * inverse_velocities[inverse_velocity_count - 1]
@@ -429,8 +452,10 @@ unsigned chopper_inverse_velocity_time_mask(
         // turns, so place both and order the pair afterwards.
         const double a = (double) n * tau + chopper_edge_time(choppers[ci], choppers[ci].edges[2 * w]);
         const double b = (double) n * tau + chopper_edge_time(choppers[ci], choppers[ci].edges[2 * w + 1]);
-        allowed_times.ranges[c].minimum = a < b ? a : b;
-        allowed_times.ranges[c++].maximum = a < b ? b : a;
+        // widened by the beam's own width, which is why this is not the same as growing
+        // the finished mask: it opens the window in time and leaves the velocities alone
+        allowed_times.ranges[c].minimum = (a < b ? a : b) - aperture;
+        allowed_times.ranges[c++].maximum = (a < b ? b : a) + aperture;
       }
     }
     // Now check each bin edge against the allowed times

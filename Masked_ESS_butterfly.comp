@@ -9,12 +9,15 @@
 * that really did hand over a flat array of numbers must build the structures instead:
 *
 *   double edges[] = {-1.8, 1.8};
-*   chopper_parameters pars[] = {{14.0, 0.02, 0.0, 2, edges, 10.0}};
+*   chopper_parameters pars[] = {{14.0, 0.02, 0.0, 2, edges, 10.0, 4.0}};
 *   chopper_ptr = (double *) pars;
 *   chopper_cnt = sizeof(pars) / sizeof(chopper_parameters);
 *
 * `edges` is a flat, increasing list of angles in degrees, two per opening, in the disk's
-* own frame; `beam` is the angle on the beam path at `delay`. See the chopper-lib README.
+* own frame; `beam` is the angle on the beam path at `delay`; and `aperture` is how wide
+* the beam is on the disk, in degrees about its spindle, which widens every window in time
+* and is what a mask for anything but a pencil beam needs. Leave it off and the row still
+* compiles, describing the point beam it described before. See the chopper-lib README.
 *******************************************************************************/
 DEFINE COMPONENT Masked_ESS_butterfly
 COPY ESS_butterfly
@@ -25,7 +28,9 @@ SETTING PARAMETERS (
   double inverse_velocity_bin,
   double time_bin,
   string filename=0,
-  noise_fraction=0.0
+  noise_fraction=0.0,
+  int mask_grow=1,
+  int use_mask=1
 )
 OUTPUT PARAMETERS ()
 SHARE INHERIT ESS_butterfly EXTEND %{
@@ -108,7 +113,7 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
     inverse_velocity_edges, inverse_velocity_count + 1,
     time_edges, time_count + 1,
     chop_pars, chopper_count,
-    1 /* grow the region by one bin in each direction */
+    mask_grow /* grow the region by this many bins in each direction */
   );
 
   if (allowed_bin_count < 1){
@@ -136,7 +141,7 @@ TRACE INHERIT ESS_butterfly EXTEND %{
   total[linear_index] += p;
 
   // If it is masked-out and a random choice is above the chosen threshold, absorb the ray
-  if (mask[linear_index] == CHOPPER_MASK_EXCLUDED && rand01() > noise_fraction) {
+  if (use_mask && mask[linear_index] == CHOPPER_MASK_EXCLUDED && rand01() > noise_fraction) {
     ABSORB;
   }
   // Otherwise, let it continue on its way -- the SCATTER call was made in ESS_butterfly

@@ -86,7 +86,7 @@ the compiler and gives a per-file summary plus annotated sources under `coverage
 
 ## Describing a chopper
 
-`chopper_parameters` is `{speed, delay, beam, edge_count, edges, path}`, and describes a
+`chopper_parameters` is `{speed, delay, beam, edge_count, edges, path, aperture}`, and describes a
 disk the way the NeXus `NXdisk_chopper` standard and the `CollectorDiskChopper` McStas
 component do: `edges` is a flat, increasing list of angles in degrees measured from the
 disk's own zero mark, two per opening, and `beam` is the angle of the mark that is on the
@@ -103,6 +103,47 @@ in, and separately where the beam crosses it. There is no conversion to do.
 A single-opening chopper of width `w` centred on the mark is `edges = {-w/2, +w/2}` --
 negative angles are allowed here, unlike in a NeXus file, because the component allows
 them and this library describes the same disk the component does.
+
+## A beam of some width
+
+Every field but the last describes a beam of no width: one ray, crossing the disk at the
+single angle `beam`. A real beam covers a range of angles, because the opening is angular
+and the beam is not, and a neutron crossing `w` metres to one side of the beam centre
+reaches an edge `w / d` radians early or late, `d` being the distance from the spindle to
+the beam. `aperture` is the width of that range in degrees. Every window widens by half of
+it at each end, and nothing else changes: the centre of a window stays where the edges put
+it, and a width has no sign, so reversing the disk widens it the same.
+
+It is an angle rather than a width in metres because that is what the disk sees, and
+because this library holds no disk geometry to convert one into the other with. The
+conversion is not a division either, because a beam window has height as well as width. Its
+corners sit further round the disk than its edges do, and the *inner* corners -- nearest the
+spindle, where a given width subtends the largest angle -- are furthest of all; while at the
+edge of the window the rim has already dropped from `radius` to `sqrt(radius² - (xwidth/2)²)`,
+which is where the openings have to hang from if they are to clear the window across its
+whole width. For a disk described the way the NeXus standard and McStas' `NXdisk_chopper`
+describe one, that leaves the inner corners at `sqrt(radius² - (xwidth/2)²) - yheight` from
+the spindle, and
+
+```
+aperture = 2 * 180 / pi * atan2(xwidth / 2, sqrt(radius² - (xwidth/2)²) - yheight)
+```
+
+Dividing the width by the radius of the beam crossing instead, `xwidth / (radius -
+yheight/2)`, misses both corrections and comes out low: 12.7 degrees where the answer is
+14.4, for a 100 mm window on a 0.5 m disk with 100 mm openings. `NXdisk_chopper` makes the
+same correction to its own geometry when `xwidth` is set, so the two agree about where the
+disk is.
+
+Zero -- what a caller that does not set it leaves behind, `aperture` being the last field
+-- is the point beam the rest of the fields describe.
+
+This is the field to reach for when a mask cuts a beam a real chopper would pass. The
+alternative, growing the finished mask by whole bins, opens the window in inverse velocity
+as well as in time, and nothing about a wide beam changes a neutron's wavelength: on one
+ESS instrument test with a 100 mm beam on 0.5 m disks, ten bins of growth kept 98.9% of
+what the disks passed while opening 27.1% of the frame, where the aperture alone kept 98.0%
+of it by opening 23.1% -- and needed no tuning, the number being the geometry.
 
 Note the sign: `speed` is signed, and only `|speed|` sets the period. A larger angle
 reaches the beam *earlier* on a disk turning forwards, so reversing a disk reflects its

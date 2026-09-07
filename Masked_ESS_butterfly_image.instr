@@ -1,0 +1,296 @@
+/*******************************************************************************
+* Instrument: Masked_ESS_butterfly_image
+*
+* %I
+* Written by: Gregory Tucker
+* Date: 2026
+* Origin: European Spallation Source ERIC
+*
+* Photograph the (wavelength, emission-time) mask a chopper train imposes on an
+* ESS_butterfly source, and what the discs it describes then pass.
+*
+* %D
+* `Masked_ESS_butterfly` hands its chopper train to chopper-lib, asks
+* `chopper_inverse_velocity_time_mask` which (inverse velocity, time) bins a neutron
+* could pass through, and refuses to emit anything outside them. This instrument makes
+* that refusal visible: a monitor in front of the first disc records what was emitted, in
+* the two coordinates the mask is drawn in, and a second monitor beyond the last disc
+* records what survived them, on the same axes.
+*
+* The source samples both coordinates uniformly -- `lambda = Lmin + range * rand01()`
+* and `t = rand01() * tmax_multiplier * ESS_SOURCE_DURATION` -- and carries the spectrum
+* in the ray weight instead. So the monitors' *N* channel is the mask itself, one count
+* per surviving sample and no brightness in it, while *I* is that mask under the source's
+* own spectrum. Read N to check the mask and I to see what an instrument would get.
+*
+* Each disc draws a stripe. A disc `path` metres downstream is open around `delay`, so it
+* passes a ray emitted at `t` with inverse velocity `iv` when `t + path * iv` falls in an
+* opening: a band of slope `-path` in the image, one per opening per turn, half as thick
+* in time as `width / (360 nu)`. Two discs at different distances cross their stripes at
+* an angle, and the mask is the patch they share.
+*
+* The default train is the pair a real one is built around. The near disc turns a narrow
+* opening close to the source, so its stripe is thin and nearly flat: it says *when* a
+* neutron may leave. The far disc turns a wide opening thirty metres out, so its stripe
+* is thick but steep: it says *which wavelengths* may leave. What comes out is the ribbon
+* they share -- about 2 AA long and a millisecond thick, with the near disc's shallow
+* edges along it and the far disc's steep ones cutting it off.
+*
+* Both delays are set from `lambda_0` and `t_0`, so both stripes pass through that point
+* by construction and the ribbon is centred on it. Move `t_0` and the pattern slides up
+* the frame; move `lambda_0` and it slides along the stripes.
+*
+*   mcstas-antlr Masked_ESS_butterfly_image.instr
+*   ./Masked_ESS_butterfly_image.out -n 2000000 lambda_0=3
+*
+* Name a parameter even when it is the default one: given none at all, McCode prompts for
+* every one of them instead of running.
+*
+* Four pictures come out of a run:
+*
+*   emission.L_U1     what the source emitted, wavelength across, emission time up
+*   transmitted.L_U1  what the discs then passed, on those same axes
+*   source.mask       the mask chopper-lib computed, on its own coarser grid
+*   source.total      every sample the source drew, mask or no mask, on that grid
+*
+* Both monitors are `Monitor_nD` reading the same axis string, so the two images
+* subtract; and both plot the emission time, not the arrival time, which is what the
+* USERVAR carried down the beam is for. Without it the second picture would be the first
+* one sheared by the flight time and the pair could not be compared at all.
+*
+* `iv_bin` and `t_bin` are the mask's grid, and are deliberately coarser than the images,
+* so the staircase along the edge of the emitted patch is the mask's own resolution
+* drawn. Coarser still and the mask stops being a picture of the choppers: a bin is kept
+* when any part of it can pass, so a bin wide enough for a stripe to slant across keeps
+* the whole slant, and `grow_mask = 1` adds a bin at every edge besides. At the defaults
+* the mask is about 1.4 times the area the two stripes actually share, all of it around
+* the rim; ten times `iv_bin` and the ribbon fattens into a block, which is worth seeing
+* once.
+*
+* `noise = 1` turns the mask off -- the component keeps a masked-out ray when
+* `rand01() > noise_fraction`, which no draw satisfies at 1 -- so the same instrument
+* takes the before picture:
+*
+*   ./Masked_ESS_butterfly_image.out -n 2000000 noise=1
+*
+* `emission` then fills the frame with the sampling the mask is applied to, and
+* `transmitted` shows what the discs pass out of the whole frame, which is the ribbon the
+* mask is meant to be a coarse copy of.
+*
+* The two are not the same measurement, and the second is not a test of the first. The
+* mask asks when a chopper is open on the beam axis; a disc's opening is angular, so a
+* beam of any width crosses it at a spread of phases, and one that misses the axis by `d`
+* is early or late by `d / (2 pi (radius - yheight/2) nu)`. Here that is a fair fraction
+* of the near disc's opening, so `transmitted` is both narrower than `emission` -- rays
+* off the axis miss a window the mask says is open -- and a little wider at each stripe
+* edge, since the same spread lets others through when the axis is shut. Widen the discs
+* and the two converge. The mask is the wrong tool for asking what a real disc passes; it
+* is the right tool for deciding what a source need not bother emitting.
+*
+* %P
+* lambda_min: [AA]    shortest wavelength the source samples, and the images' left edge
+* lambda_max: [AA]    longest wavelength the source samples, and the images' right edge
+* lambda_0: [AA]      the wavelength the train is set for
+* t_0: [s]            the emission time the train is set for, at lambda_0
+* near_path: [m]      how far the near disc is from the source
+* near_nu: [Hz]       its signed rotation frequency
+* near_width: [deg]   its single opening, centred on the disc's zero mark
+* far_path: [m]       how far the far disc is; the two paths are the stripe slopes
+* far_nu: [Hz]        its signed rotation frequency
+* far_width: [deg]    its single opening, centred on the disc's zero mark
+* iv_bin: [s/m]       inverse velocity bin of the mask, not of the images
+* t_bin: [s]          time bin of the mask, not of the images
+* noise: [1]          chance of keeping a masked-out ray; 1 disables the mask
+* nL: [1]             wavelength bins in both images
+* nt: [1]             emission time bins in both images
+* disc_radius: [m]    outer radius of both discs
+* slit_height: [m]    radial height of their openings, so the hub is the difference
+* slit_width: [m]     the pre-chopper aperture width, otherwise the full opening is always allowed to pass neutrons
+* growth: [1]         the number of mask bins to expand in each of the wavelength and emission time directions
+* do_mask: [1]        a flag to allow turning off the source masking, but not the mask calculation
+*
+* %E
+*******************************************************************************/
+DEFINE INSTRUMENT Masked_ESS_butterfly_image(
+  lambda_min = 1.0,
+  lambda_max = 5.0,
+  lambda_0 = 3.0,
+  t_0 = 0.0043,
+  near_path = 2.0,
+  near_nu = 14,
+  near_width = 6,
+  far_path = 30.0,
+  far_nu = 14,
+  far_width = 60,
+  iv_bin = 1e-5,
+  t_bin = 1e-4,
+  noise = 0,
+  int nL = 256,
+  int nt = 256,
+  disc_radius = 0.5,
+  slit_height = 0.1,
+  slit_width = 0.1,
+  int growth = 1,
+  int do_mask = 1
+)
+
+DECLARE
+%{
+/* The same library the component uses, so the train is built in its terms rather than in
+ * a copy of them. McCode emits the include once however many blocks ask for it, and the
+ * component's SHARE asks too. */
+%include "chopper-lib"
+
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
+#error "This instrument describes discs by their slit edges; chopper-lib 4.0.0 or newer is required"
+#endif
+
+chopper_parameters * train;  /* the two discs, as chopper-lib describes them */
+double * train_as_doubles;   /* the same pointer, where a component can take it */
+double near_edges[2];        /* one opening each, symmetric about the zero mark, so */
+double far_edges[2];         /* the window is centred on the disc's own delay */
+double near_delay;
+double far_delay;
+double t_frame;              /* the emission window the source samples, seconds */
+char image_axes[256];        /* Monitor_nD reads its axes, and their limits, from text */
+%}
+
+/* Carried from the moderator to the far monitor, so what the discs pass is drawn against
+ * the time the ray left rather than the time it arrived. Without it the second image is
+ * the first one sheared by the flight time, and the two cannot be compared. */
+USERVARS
+%{
+double t_emit;
+%}
+
+INITIALIZE
+%{
+/* An edge at angle a reaches the beam at `delay + (beam - a) / (360 nu)`, so the pair
+ * {-w/2, +w/2} straddles `delay` whichever way the disc turns. That is what makes
+ * `delay` the centre of the window rather than one of its ends. */
+near_edges[0] = -near_width / 2.0;
+near_edges[1] =  near_width / 2.0;
+far_edges[0] = -far_width / 2.0;
+far_edges[1] =  far_width / 2.0;
+
+/* Set both discs for the same ray: the one leaving the moderator at `t_0` with
+ * wavelength `lambda_0`. It reaches a disc `path` metres away at `t_0 + path * iv`, so
+ * that is when the disc has to be open. Both stripes then run through (lambda_0, t_0),
+ * and the ribbon is centred there. */
+double iv_0 = lambda_0 * V2K / 2 / PI;
+near_delay = t_0 + near_path * iv_0;
+far_delay = t_0 + far_path * iv_0;
+
+train = (chopper_parameters *) calloc(2, sizeof(chopper_parameters));
+if (train == NULL) {
+    printf("Masked_ESS_butterfly_image: out of memory building the train\n");
+    exit(-1);
+}
+/* How wide the beam is on each disc, as the disc sees it: the angle its window subtends
+ * about the spindle, which is what chopper-lib needs to widen its windows in time and
+ * leave the wavelengths alone.
+ *
+ * The window is `slit_width` across and `slit_height` deep, and it is the inner corners
+ * that stand furthest round the disc -- the same width is a larger angle the closer to the
+ * spindle it is. NXdisk_chopper hangs the openings from the rim's height at the edge of
+ * the window, `sqrt(radius^2 - (xwidth/2)^2)`, so those corners are `slit_height` inside
+ * that. Both discs are the same size here, so both see the same angle. */
+double disc_reach = sqrt(disc_radius * disc_radius - slit_width * slit_width / 4.0);
+double aperture = 2 * RAD2DEG * atan2(slit_width / 2.0, disc_reach - slit_height);
+
+train[0] = (chopper_parameters){near_nu, near_delay, 0.0, 2, near_edges, near_path, aperture};
+train[1] = (chopper_parameters){far_nu, far_delay, 0.0, 2, far_edges, far_path, aperture};
+
+/* The cast the component documents. A McCode SETTING PARAMETER carries only `double *`,
+ * so the train travels as one and is read back as a `chopper_parameters *` at the far
+ * end. Done here rather than in the parameter list, which has no syntax for a cast. */
+train_as_doubles = (double *) train;
+
+/* What the source samples, and so what the images have to span: ESS_butterfly draws its
+ * emission time from [0, tmax_multiplier * ESS_SOURCE_DURATION), and the component builds
+ * its mask over the same range. Both are left at their defaults here, so this is that
+ * range written out. */
+t_frame = 3 * 2.857e-3;
+
+/* Both monitors read this one string, so the two images land on identical axes and can be
+ * subtracted. Wavelength first, so it is the horizontal one. */
+sprintf(image_axes,
+        "lambda limits=[%g %g] bins=%d, user1 limits=[%g %g] bins=%d",
+        lambda_min, lambda_max, nL, 0.0, t_frame, nt);
+
+printf("Masked_ESS_butterfly_image: discs at %g m and %g m, set for %g AA leaving at "
+       "%g ms; delays %g ms and %g ms\n",
+       near_path, far_path, lambda_0, 1e3 * t_0, 1e3 * near_delay, 1e3 * far_delay);
+%}
+
+TRACE
+
+COMPONENT origin = Progress_bar()
+AT (0, 0, 0) ABSOLUTE
+
+/* The source under test. Its INITIALIZE builds the mask from the train and its TRACE
+ * applies it; `filename` names the two files it writes the mask and the sampling to. */
+COMPONENT source = Masked_ESS_butterfly(
+  sector = "N", beamline = 1, Lmin = lambda_min, Lmax = lambda_max,
+  yheight = 0.03, cold_frac = 0.5, dist = far_path, focus_xw = slit_width, focus_yh = slit_height,
+  acc_power = 2.0, n_pulses = 1,
+  choppers = train_as_doubles, chopper_count = 2,
+  inverse_velocity_bin = iv_bin, time_bin = t_bin,
+  filename = "source", noise_fraction = noise, mask_grow=growth, use_mask=do_mask
+) AT (0, 0, 0) ABSOLUTE
+EXTEND
+%{
+  t_emit = t;
+%}
+
+/* Half a metre downstream, and not closer: the butterfly's emission surface has depth --
+ * the cold wings stand behind the thermal face -- so a monitor at the nominal moderator
+ * plane sits inside it and half the rays would have to travel backwards to reach it,
+ * which McCode will not do. At half a metre every ray has been emitted. Nothing about
+ * the picture depends on the distance, since the axes are the wavelength and the emission
+ * time the ray carries, not where or when it crossed this plane.
+ *
+ * The window is wide enough to take the whole butterfly, since where a ray crosses is of
+ * no interest here -- only when it left and how fast it is going. */
+COMPONENT emission = Monitor_nD(
+  xwidth = 1.0, yheight = 1.0,
+  user1 = "t_emit", username1 = "Emission time [s]",
+  options = image_axes, filename = "emission", restore_neutron = 1
+) AT (0, 0, 0.5) RELATIVE source
+
+
+COMPONENT near_slit = Slit(xwidth=slit_width, yheight=slit_height) AT (0, 0, near_path-0.01) RELATIVE source
+
+/* The two discs the train describes, where it says they are, turning as it says they
+ * turn. NXdisk_chopper places an edge at angle `a` on the beam at
+ * `delay + (beam_angle - a) / (360 nu)`, which is chopper-lib's own expression with
+ * `beam` spelled `beam_angle`, so these are the train made of metal. */
+COMPONENT near_disc = NXdisk_chopper(
+  slit_edges = near_edges, n_edges = 2,
+  radius = disc_radius, yheight = slit_height, xwidth = slit_width,
+  nu = near_nu, delay = near_delay, beam_angle = 0, zero_angle = 0,
+  abs_out = 0, verbose = 1
+) AT (0, 0, near_path) RELATIVE source
+
+COMPONENT far_slit = Slit(xwidth=slit_width, yheight=slit_height) AT (0, 0, far_path-0.01) RELATIVE source
+
+COMPONENT far_disc = NXdisk_chopper(
+  slit_edges = far_edges, n_edges = 2,
+  radius = disc_radius, yheight = slit_height, xwidth = slit_width,
+  nu = far_nu, delay = far_delay, beam_angle = 0, zero_angle = 0,
+  abs_out = 0, verbose = 1
+) AT (0, 0, far_path) RELATIVE source
+
+/* What survived both discs, against emission time still. */
+COMPONENT transmitted = Monitor_nD(
+  xwidth = 1.0, yheight = 1.0,
+  user1 = "t_emit", username1 = "Emission time [s]",
+  options = image_axes, filename = "transmitted", restore_neutron = 1
+) AT (0, 0, far_path + 0.01) RELATIVE source
+
+FINALLY
+%{
+if (train) free(train);
+%}
+
+END

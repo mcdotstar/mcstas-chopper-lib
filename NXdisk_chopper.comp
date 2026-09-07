@@ -41,7 +41,7 @@
 * slit_edges: [deg] opening and closing edge of each slit, from the disc's zero mark, in pairs
 * n_edges: [1]     number of entries in slit_edges; must be even and non-zero
 * radius: [m]      outer radius of the disc
-* yheight: [m]     radial height of the openings; 0 means they reach the spindle
+* yheight: [m]     radial clearance of the openings across the whole window; 0 means they reach the spindle
 * xwidth: [m]      chord width of the beam window; 0 leaves the opening unrestricted
 * nu: [Hz]         signed rotation frequency; 0 parks the disc at park_angle
 * delay: [s]       when the disc's zero mark is on the beam
@@ -119,12 +119,32 @@ INITIALIZE
         nx_disk_chopper_error(NAME_CURRENT_COMP, "slit_edges span a full turn or more");
     }
 
-    double height = (yheight == 0) ? radius : yheight;
-    if (height > radius) {
-        nx_disk_chopper_error(NAME_CURRENT_COMP, "yheight must not exceed radius");
+    /* Where the rim stands at the edge of the beam window, rather than on the axis.
+     *
+     * A window `xwidth` wide reaches the rim at x = +-xwidth/2, and there the circle has
+     * already dropped to sqrt(radius^2 - (xwidth/2)^2). Hanging the window from `radius`
+     * instead puts its top corners outside the disc, where they are either absorbed or
+     * -- since abs_out defaults to 0 -- passed unchopped, and leaves the openings a
+     * sagitta short of the height they were asked for at the edges of the window. So the
+     * window hangs from the rim's height at its own edge: the spindle comes up by the
+     * sagitta and the openings grow by it, which is what makes `yheight` the clearance
+     * across the whole window rather than only on the axis.
+     *
+     * With xwidth = 0 the reach is the radius and this is the arrangement it always was.
+     */
+    double half_width = (xwidth > 0) ? xwidth / 2.0 : 0.0;
+    if (half_width >= radius) {
+        nx_disk_chopper_error(NAME_CURRENT_COMP, "xwidth must fit inside the disc");
     }
-    delta_y = radius - height / 2.0;
-    inner_radius = radius - height;
+    double reach = sqrt(radius * radius - half_width * half_width);
+    /* Openings that reach the spindle reach it from there, so a window still fits */
+    double height = (yheight == 0) ? reach : yheight;
+    if (height > reach) {
+        nx_disk_chopper_error(NAME_CURRENT_COMP,
+            "yheight must fit between the spindle and the rim at the edge of the window");
+    }
+    delta_y = reach - height / 2.0;
+    inner_radius = reach - height;
     omega = 2.0 * PI * nu;
 
     /* Which way the disc lies. The component sits at the beam crossing, so the
@@ -221,6 +241,32 @@ MCDISPLAY
 
     double turned = mark + (nu == 0 ? DEG2RAD * park_angle : 0.0);
     double deg_resolution = 1.0;
+    /* The beam window, when there is one. It belongs to the housing rather than to
+     * the disc, so it does not turn with the openings, and its four corners are the
+     * thing worth seeing: the openings are hung from the rim's height at the edge of
+     * the window rather than on the axis, so every corner should sit inside the
+     * annulus. A window poking past the rim, or a hub crossing its lower edge, is the
+     * geometry being wrong -- which is not otherwise visible in a drawing of arcs.
+     *
+     * The radial half-height is `delta_y - inner_radius`: the beam crosses at
+     * `delta_y` and the openings reach in to `inner_radius`, and the window is the
+     * span between them mirrored about the crossing. */
+    if (xwidth > 0) {
+        const double half_across = xwidth / 2.0;
+        const double half_along = delta_y - inner_radius;
+        double corner_x[4], corner_y[4];
+        for (int c = 0; c < 4; ++c) {
+            const double across_at = (c == 0 || c == 3) ? -half_across : half_across;
+            const double along_at = (c < 2) ? -half_along : half_along;
+            corner_x[c] = across_at * across_x + along_at * along_x;
+            corner_y[c] = across_at * across_y + along_at * along_y;
+        }
+        for (int c = 0; c < 4; ++c) {
+            const int next = (c + 1) % 4;
+            line(corner_x[c], corner_y[c], 0, corner_x[next], corner_y[next], 0);
+        }
+    }
+
     if (mcdotrace == 1) {
         /* about the spindle, wherever the angles put it */
 	double last_x = spindle_x + radius * sin(turned + DEG2RAD * slit_edges[0]);
