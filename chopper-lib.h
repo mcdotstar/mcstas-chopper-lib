@@ -26,6 +26,12 @@
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.1.0
+ *     `chopper_mask_sampler` draws an (inverse velocity, time) pair from the allowed
+ *     cells of a finished mask, and carries the `acceptance` a caller has to multiply
+ *     the ray weight by to keep the sampling unbiased. Additive: nothing already
+ *     described means anything different.
+ *
  * 4.0.0
  *     One `chopper_parameters` describes a disk of any number of openings, by its slit
  *     edges. `chopper_window`, `multi_chopper_parameters`, `single_to_multi_chopper` and
@@ -69,7 +75,7 @@
  *     Unversioned releases, taking `phase`.
  */
 #define CHOPPER_LIB_VERSION_MAJOR 4
-#define CHOPPER_LIB_VERSION_MINOR 0
+#define CHOPPER_LIB_VERSION_MINOR 1
 #define CHOPPER_LIB_VERSION_PATCH 0
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
 #define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
@@ -332,6 +338,135 @@ enum mask_values {
   CHOPPER_MASK_INCLUDED = 1,
   CHOPPER_MASK_GROWN = 100
 };
+
+/** A direct sampler over the allowed cells of a finished mask
+ *
+ * A source that draws an (inverse velocity, time) pair and throws it away when the mask
+ * excludes it spends its whole ray budget to keep the fraction the choppers pass. Drawing
+ * from the allowed cells in the first place keeps all of it, and is the same distribution
+ * -- provided the weight is corrected, which is what `acceptance` is for.
+ *
+ * The correction is not a matter of taste. A ray drawn from proposal `q` and carrying
+ * weight `w` estimates a downstream tally as `E[T] = N E_q[w f]`, and `f` is zero outside
+ * the allowed set `A` because the discs stop those rays. Drawing from `q` restricted to
+ * `A` instead multiplies that by `1 / Q`, where
+ *
+ *     Q = P(a draw from q lands in A)
+ *
+ * so multiplying every accepted ray's weight by `Q` puts it back. Two things this `Q` is
+ * not, both of which are easy to reach for:
+ *
+ *   - It is not `chopper_unmasked_probability`. That is the allowed fraction of a
+ *     *weighted* signal, which is the transmission an instrument sees and the wrong
+ *     normalisation for this. `Q` counts draws, not intensity.
+ *   - It is not recoverable from a rejection loop's trial count. For a geometric number
+ *     of trials `k`, `E[1/k]` is not `Q`, so per-ray attempt counting biases the answer.
+ *
+ * `Q` is exact here because it is a ratio of areas: `chopper_mask_sampler_make` is told
+ * the region the caller samples uniformly, clips every cell to it, and returns the
+ * allowed area over the whole area. It is exact only while the caller really does sample
+ * both coordinates uniformly and independently of everything else it draws -- see the
+ * note on `chopper_mask_sampler_make`.
+ *
+ * Drawing costs one binary search and three uniform deviates, and never rejects.
+ *
+ * @param count The number of allowed cells the sampler draws from
+ * @param acceptance `Q`: the allowed area over the sampled area, and the factor a ray
+ *                   weight must be multiplied by
+ * @param cumulative `count` entries increasing to 1, the area-weighted cell distribution
+ * @param inverse_velocity_low The low edge of each cell, clipped to the sampled region
+ * @param inverse_velocity_width Its width after clipping; never negative, never zero
+ * @param time_low The low time edge of each cell, clipped the same way
+ * @param time_width Its width after clipping
+ */
+struct chopper_mask_sampler_struct {
+  unsigned count;
+  double acceptance;
+  double * cumulative;
+  double * inverse_velocity_low;
+  double * inverse_velocity_width;
+  double * time_low;
+  double * time_width;
+};
+typedef struct chopper_mask_sampler_struct chopper_mask_sampler;
+
+/** Build a sampler over the allowed cells of a mask
+ *
+ * The mask grid and the region a caller samples are not the same rectangle. A grid sized
+ * with `ceil` runs past the region in its last row and column, and a cell there is only
+ * partly reachable; weighting it whole would over-represent it and inflate `acceptance`.
+ * Every cell is therefore clipped to
+ * `[inverse_velocity_minimum, inverse_velocity_minimum + inverse_velocity_range]` and
+ * `[time_minimum, time_minimum + time_range]` before it is weighted, and a cell left with
+ * no area is dropped.
+ *
+ * @param mask The finished mask, as `chopper_inverse_velocity_time_mask` leaves it:
+ *             `CHOPPER_MASK_EXCLUDED` where nothing passes and `CHOPPER_MASK_INCLUDED`
+ *             everywhere else, grown cells included
+ * @param mask_inverse_velocity_count Inverse velocity bins in the mask
+ * @param mask_time_count Time bins in the mask
+ * @param inverse_velocities The `mask_inverse_velocity_count + 1` bin edges, increasing
+ * @param times The `mask_time_count + 1` time bin edges, increasing
+ * @param inverse_velocity_minimum The low edge of the region the caller samples
+ * @param inverse_velocity_range Its width; the caller draws uniformly across it
+ * @param time_minimum The low edge of the time region the caller samples
+ * @param time_range Its width; the caller draws uniformly across it too
+ * @return A sampler whose `cumulative` and edge arrays are allocated here and must be
+ *         released with `chopper_mask_sampler_free`. A mask that allows nothing, or
+ *         allows nothing inside the sampled region, comes back with `count` 0,
+ *         `acceptance` 0 and no allocations; drawing from it is a caller error.
+ *
+ * @note The `acceptance` this returns is only the right weight correction while the two
+ *       coordinates are drawn uniformly, independently of each other, and independently
+ *       of everything else the caller samples. A source that picks its emission time from
+ *       a window centred on the neutron's own velocity -- McStas' `ESS_butterfly` under
+ *       time focusing does exactly that -- breaks the independence, and no single number
+ *       corrects it.
+ */
+chopper_mask_sampler chopper_mask_sampler_make(
+  const int * mask, unsigned mask_inverse_velocity_count, unsigned mask_time_count,
+  const double * inverse_velocities, const double * times,
+  double inverse_velocity_minimum, double inverse_velocity_range,
+  double time_minimum, double time_range
+  );
+
+/** Zero a sampler, so it can be freed or tested before it has been built
+ *
+ * A caller that builds a sampler only on some paths still has to be able to free it on all
+ * of them. This puts one in the state `chopper_mask_sampler_free` leaves behind: `count`
+ * and `acceptance` zero, every pointer NULL.
+ *
+ * @param sampler The sampler to empty; nothing it currently points at is released, so do
+ *                not call this on a built sampler in place of `chopper_mask_sampler_free`
+ */
+void chopper_mask_sampler_empty(chopper_mask_sampler * sampler);
+
+/** Release what `chopper_mask_sampler_make` allocated, and leave an empty sampler behind
+ *
+ * @param sampler The sampler to empty; a NULL pointer, or one already emptied, is fine
+ */
+void chopper_mask_sampler_free(chopper_mask_sampler * sampler);
+
+/** Draw one (inverse velocity, time) pair uniformly from the allowed region
+ *
+ * The three deviates are arguments rather than drawn here so that the library needs no
+ * random number generator of its own, and so that a caller inside a McStas TRACE can
+ * hand over `rand01()` and stay on whatever generator the instrument was built with.
+ *
+ * @param sampler A sampler with a non-zero `count`
+ * @param cell_deviate A uniform deviate on [0, 1), choosing which allowed cell
+ * @param inverse_velocity_deviate A uniform deviate on [0, 1), placing the point across it
+ * @param time_deviate A uniform deviate on [0, 1), placing the point up it
+ * @param inverse_velocity [out] The drawn inverse velocity, in s/m
+ * @param time [out] The drawn time, in s
+ *
+ * @note The caller still owes the ray weight a factor of `sampler->acceptance`.
+ */
+void chopper_mask_sampler_draw(
+  const chopper_mask_sampler * sampler,
+  double cell_deviate, double inverse_velocity_deviate, double time_deviate,
+  double * inverse_velocity, double * time
+  );
 
 int chopper_write_mask_to_file(
   const char * directory, const char * filename, const char * extension, const char * path_sep,

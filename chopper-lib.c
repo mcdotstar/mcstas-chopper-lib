@@ -565,6 +565,142 @@ double chopper_unmasked_probability(
   return total_signal ? unmasked_signal / total_signal : 0.0;
 }
 
+/*************************** mask sampling ******************************************/
+
+/* How much of [low, high] lies inside [limit_low, limit_high]; never negative. */
+static double chopper_clipped_width(
+  const double low, const double high, const double limit_low, const double limit_high
+) {
+  const double lo = low > limit_low ? low : limit_low;
+  const double hi = high < limit_high ? high : limit_high;
+  return hi > lo ? hi - lo : 0.0;
+}
+
+void chopper_mask_sampler_empty(chopper_mask_sampler * sampler) {
+  if (sampler == NULL) return;
+  sampler->count = 0;
+  sampler->acceptance = 0.0;
+  sampler->cumulative = NULL;
+  sampler->inverse_velocity_low = NULL;
+  sampler->inverse_velocity_width = NULL;
+  sampler->time_low = NULL;
+  sampler->time_width = NULL;
+}
+
+chopper_mask_sampler chopper_mask_sampler_make(
+  const int * mask, const unsigned mask_inverse_velocity_count, const unsigned mask_time_count,
+  const double * inverse_velocities, const double * times,
+  const double inverse_velocity_minimum, const double inverse_velocity_range,
+  const double time_minimum, const double time_range
+) {
+  chopper_mask_sampler sampler;
+  chopper_mask_sampler_empty(&sampler);
+
+  if (mask == NULL || inverse_velocities == NULL || times == NULL) return sampler;
+  if (mask_inverse_velocity_count == 0 || mask_time_count == 0) return sampler;
+  if (inverse_velocity_range <= 0.0 || time_range <= 0.0) {
+    printf("A mask sampler needs a region to sample: given %g s/m by %g s\n",
+           inverse_velocity_range, time_range);
+    return sampler;
+  }
+
+  const double inverse_velocity_maximum = inverse_velocity_minimum + inverse_velocity_range;
+  const double time_maximum = time_minimum + time_range;
+
+  /* A cell partly outside the sampled region contributes only the part inside it, and one
+   * wholly outside contributes nothing and is left out of the sampler entirely. */
+  unsigned allowed = 0;
+  for (unsigned ti = 0; ti < mask_time_count; ++ti) {
+    const double dt = chopper_clipped_width(times[ti], times[ti + 1], time_minimum, time_maximum);
+    if (dt <= 0.0) continue;
+    for (unsigned vi = 0; vi < mask_inverse_velocity_count; ++vi) {
+      if (mask[ti * mask_inverse_velocity_count + vi] == CHOPPER_MASK_EXCLUDED) continue;
+      if (chopper_clipped_width(inverse_velocities[vi], inverse_velocities[vi + 1],
+                                inverse_velocity_minimum, inverse_velocity_maximum) > 0.0) {
+        ++allowed;
+      }
+    }
+  }
+  if (allowed == 0) return sampler;
+
+  sampler.cumulative = calloc(allowed, sizeof(double));
+  sampler.inverse_velocity_low = calloc(allowed, sizeof(double));
+  sampler.inverse_velocity_width = calloc(allowed, sizeof(double));
+  sampler.time_low = calloc(allowed, sizeof(double));
+  sampler.time_width = calloc(allowed, sizeof(double));
+  if (sampler.cumulative == NULL || sampler.inverse_velocity_low == NULL
+      || sampler.inverse_velocity_width == NULL || sampler.time_low == NULL
+      || sampler.time_width == NULL) {
+    printf("Out of memory building a mask sampler over %u cells\n", allowed);
+    chopper_mask_sampler_free(&sampler);
+    return sampler;
+  }
+
+  double area = 0.0;
+  unsigned c = 0;
+  for (unsigned ti = 0; ti < mask_time_count; ++ti) {
+    const double t_low = times[ti] > time_minimum ? times[ti] : time_minimum;
+    const double dt = chopper_clipped_width(times[ti], times[ti + 1], time_minimum, time_maximum);
+    if (dt <= 0.0) continue;
+    for (unsigned vi = 0; vi < mask_inverse_velocity_count; ++vi) {
+      if (mask[ti * mask_inverse_velocity_count + vi] == CHOPPER_MASK_EXCLUDED) continue;
+      const double dv = chopper_clipped_width(inverse_velocities[vi], inverse_velocities[vi + 1],
+                                              inverse_velocity_minimum, inverse_velocity_maximum);
+      if (dv <= 0.0) continue;
+      sampler.inverse_velocity_low[c] = inverse_velocities[vi] > inverse_velocity_minimum
+                                      ? inverse_velocities[vi] : inverse_velocity_minimum;
+      sampler.inverse_velocity_width[c] = dv;
+      sampler.time_low[c] = t_low;
+      sampler.time_width[c] = dt;
+      area += dv * dt;
+      sampler.cumulative[c] = area;
+      ++c;
+    }
+  }
+  sampler.count = c;
+  sampler.acceptance = area / (inverse_velocity_range * time_range);
+  /* Normalise the running area into a distribution, and pin the last entry rather than
+   * leave a draw above it to fall off the end of a binary search. */
+  for (unsigned i = 0; i < sampler.count; ++i) sampler.cumulative[i] /= area;
+  sampler.cumulative[sampler.count - 1] = 1.0;
+
+  return sampler;
+}
+
+void chopper_mask_sampler_free(chopper_mask_sampler * sampler) {
+  if (sampler == NULL) return;
+  if (sampler->cumulative) free(sampler->cumulative);
+  if (sampler->inverse_velocity_low) free(sampler->inverse_velocity_low);
+  if (sampler->inverse_velocity_width) free(sampler->inverse_velocity_width);
+  if (sampler->time_low) free(sampler->time_low);
+  if (sampler->time_width) free(sampler->time_width);
+  chopper_mask_sampler_empty(sampler);
+}
+
+#ifdef __GNUC__
+#pragma acc routine seq
+#endif
+void chopper_mask_sampler_draw(
+  const chopper_mask_sampler * sampler,
+  const double cell_deviate, const double inverse_velocity_deviate, const double time_deviate,
+  double * inverse_velocity, double * time
+) {
+  if (sampler == NULL || sampler->count == 0) return;
+  /* The first cell whose cumulative share reaches the deviate. */
+  unsigned low = 0, high = sampler->count - 1;
+  while (low < high) {
+    const unsigned mid = low + (high - low) / 2;
+    if (sampler->cumulative[mid] <= cell_deviate) low = mid + 1; else high = mid;
+  }
+  if (inverse_velocity != NULL) {
+    *inverse_velocity = sampler->inverse_velocity_low[low]
+                      + sampler->inverse_velocity_width[low] * inverse_velocity_deviate;
+  }
+  if (time != NULL) {
+    *time = sampler->time_low[low] + sampler->time_width[low] * time_deviate;
+  }
+}
+
 static void chopper_write_axes_to_file(FILE * file,
     const double * inverse_velocities, const unsigned inverse_velocity_count,
     const double * times, const unsigned time_count) {
