@@ -87,6 +87,8 @@
 * and the two converge. The mask is the wrong tool for asking what a real disc passes; it
 * is the right tool for deciding what a source need not bother emitting.
 *
+* %Example: -y Detector: transmitted_I=1.96702e+08
+*
 * %P
 * lambda_min: [AA]    shortest wavelength the source samples, and the images' left edge
 * lambda_max: [AA]    longest wavelength the source samples, and the images' right edge
