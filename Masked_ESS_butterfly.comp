@@ -20,7 +20,7 @@
 * compiles, describing the point beam it described before. See the chopper-lib README.
 *******************************************************************************/
 DEFINE COMPONENT Masked_ESS_butterfly
-COPY ESS_butterfly
+INHERIT ESS_butterfly
 DEFINITION PARAMETERS ()
 SETTING PARAMETERS (
   double * choppers,
