@@ -138,15 +138,6 @@ DEFINE INSTRUMENT Masked_ESS_butterfly_image(
 
 DECLARE
 %{
-/* The same library the component uses, so the train is built in its terms rather than in
- * a copy of them. McCode emits the include once however many blocks ask for it, and the
- * component's SHARE asks too. */
-%include "chopper-lib"
-
-#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
-#error "This instrument describes discs by their slit edges; chopper-lib 4.0.0 or newer is required"
-#endif
-
 chopper_parameters * train;  /* the two discs, as chopper-lib describes them */
 double * train_as_doubles;   /* the same pointer, where a component can take it */
 double near_edges[2];        /* one opening each, symmetric about the zero mark, so */

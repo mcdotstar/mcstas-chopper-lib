@@ -34,7 +34,7 @@ SETTING PARAMETERS (
 )
 OUTPUT PARAMETERS ()
 SHARE INHERIT ESS_butterfly EXTEND %{
-  %include "chopper-lib.h"
+  %include "chopper-lib"
 
 #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
 #error "Masked_ESS_butterfly describes choppers by edges; chopper-lib 4.0.0 or newer is required"
