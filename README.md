@@ -231,6 +231,29 @@ window centred on the neutron's own velocity does not, and no single factor corr
 `Masked_ESS_butterfly` is the worked example: `resample=1` uses the sampler, and its
 INITIALIZE refuses time focusing, which is the configuration where the independence fails.
 
+## Writing a grid out under MPI
+
+`chopper_write_mask_to_file` and `chopper_write_total_to_file` truncate what they open, so a
+caller that saves the same grid twice in one run -- which McCode does, saving on SIGUSR2 and
+carrying on before saving again at the end -- replaces the file rather than leaving the second
+copy nose to tail with the first. Before 4.1.0 they appended.
+
+Neither knows anything about MPI, and neither should: a grid is reduced across the nodes by
+whoever owns it, and only then written. `Masked_ESS_butterfly` is the worked example again,
+and the two halves of it are worth separating because they fail differently.
+
+Every node runs SAVE -- McCode calls `finally()` on all of them and `finally()` calls `save()`
+unconditionally -- and `mcuse_dir` hands them all one output directory. So the writing has to
+be master's alone, or each file collects one copy per node; and the grids have to be summed
+first, or master's copy holds master's share. The sum is a plain `mc_MPI_Sum` with no division
+by the node count, because a McCode ray weight already carries one over the *whole* run's
+ncount: `mcget_ncount()` returns the full figure in INITIALIZE, and McCode slices it across the
+nodes only afterwards.
+
+An `acceptance` is not summed and must not be. It is a function of the mask's geometry, so
+every node computes the same number, and reducing it would scale every ray weight in the run by
+the node count.
+
 Version 4.0.0 replaced the `{speed, delay, angle, path}` and
 `{speed, delay, window_count, windows, path}` pair of structures with the single one
 above, and reversed the sign of the angle term. The field names changed with it, so a

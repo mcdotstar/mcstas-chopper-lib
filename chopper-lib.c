@@ -677,9 +677,14 @@ void chopper_mask_sampler_free(chopper_mask_sampler * sampler) {
   chopper_mask_sampler_empty(sampler);
 }
 
-#ifdef __GNUC__
-#pragma acc routine seq
+/* Unconditional, as McCode's own libraries write it. Whether this is callable from a kernel
+ * must not rest on the compiler happening to define __GNUC__, which NVHPC does only for
+ * glibc's benefit. MSVC warns on the unknown pragma; the generated instrument silences 4068
+ * the same way. */
+#ifdef _MSC_EXTENSIONS
+#pragma warning(disable: 4068)
 #endif
+#pragma acc routine seq
 void chopper_mask_sampler_draw(
   const chopper_mask_sampler * sampler,
   const double cell_deviate, const double inverse_velocity_deviate, const double time_deviate,
@@ -747,7 +752,11 @@ static FILE * chopper_open_file_for_writing(
     // need to add the extension
     sprintf(filepath + strlen(filepath), "%s", extension);
   }
-  FILE * file = fopen(filepath, "a");
+  /* Truncating, not appending. A caller may write the same grid more than once in a run --
+   * McStas saves on SIGUSR2 and carries on, then saves again at the end -- and appending
+   * leaves the second copy nose to tail with the first in one file, which reads as a single
+   * grid of twice the rows. */
+  FILE * file = fopen(filepath, "w");
   if (file == NULL) {
     printf("Could not open file %s for writing\n", filepath);
   }
