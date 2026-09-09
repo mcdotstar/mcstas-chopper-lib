@@ -677,9 +677,14 @@ void chopper_mask_sampler_free(chopper_mask_sampler * sampler) {
   chopper_mask_sampler_empty(sampler);
 }
 
-#ifdef __GNUC__
-#pragma acc routine seq
+/* Unconditional, as McCode's own libraries write it. Whether this is callable from a kernel
+ * must not rest on the compiler happening to define __GNUC__, which NVHPC does only for
+ * glibc's benefit. MSVC warns on the unknown pragma; the generated instrument silences 4068
+ * the same way. */
+#ifdef _MSC_EXTENSIONS
+#pragma warning(disable: 4068)
 #endif
+#pragma acc routine seq
 void chopper_mask_sampler_draw(
   const chopper_mask_sampler * sampler,
   const double cell_deviate, const double inverse_velocity_deviate, const double time_deviate,

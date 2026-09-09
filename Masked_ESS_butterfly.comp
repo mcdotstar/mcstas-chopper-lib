@@ -59,9 +59,9 @@
 * one over the *whole* run's ncount: ESS_butterfly reads mcget_ncount() in INITIALIZE,
 * which mccode_main runs before it slices ncount across the nodes.
 *
-* MPI is the only parallelism this is safe under. The grids are accumulated with a bare
-* `+=` from TRACE, which is a data race between OpenACC threads and merely separate memory
-* between MPI nodes.
+* MPI is the parallelism this has been run under. The grids are accumulated atomically, so
+* OpenACC threads should be safe too, but the component carries NOACC until someone has
+* compiled it with nvc and run it on a device -- see the note by that keyword.
 *
 * Resampling changes only how the surviving rays are drawn, never which region survives.
 * It inherits the mask's own approximations -- bin quantisation, `mask_grow`, the disc
@@ -97,6 +97,16 @@ SETTING PARAMETERS (
   int resample=0
 )
 OUTPUT PARAMETERS ()
+/* The three grids below are written from TRACE with `#pragma acc atomic`, so the accumulation
+ * is race-free as it stands, and everything they and the sampler point at is ordinary
+ * calloc'd memory that `-gpu=mem:managed` -- the flag every McCode OpenACC toolchain sets --
+ * makes reachable from a kernel. NOACC is here because none of that has been compiled by nvc,
+ * let alone run on a device: it is an untested claim, not a known failure. Removing this line
+ * is the whole experiment. If it works the component belongs on the GPU; if it does not, the
+ * pragmas below are where to look first. NOACC costs only a host/device transition at the
+ * head of the pipeline, since cogen splits the FUNNEL loop at the boundary rather than
+ * dropping the whole instrument to CPU. */
+NOACC
 SHARE INHERIT ESS_butterfly EXTEND %{
   %include "chopper-lib"
 
@@ -345,8 +355,14 @@ TRACE INHERIT ESS_butterfly EXTEND %{
   // Record the total probability distribution sampled, and the sampling itself. `counted`
   // carries no weight on purpose: the acceptance the resampling corrects by counts draws,
   // not intensity, so this is what SAVE checks it against.
-  total[linear_index] += p;
-  counted[linear_index] += 1.0;
+  //
+  // Atomic because every ray in flight shares these grids. Written the way McCode's own
+  // monitors write theirs -- see PSD_monitor.comp -- as a read and a store rather than a
+  // compound assignment.
+  #pragma acc atomic
+  total[linear_index] = total[linear_index] + p;
+  #pragma acc atomic
+  counted[linear_index] = counted[linear_index] + 1.0;
 
   if (use_mask) {
     if (resample) {
@@ -414,7 +430,8 @@ TRACE INHERIT ESS_butterfly EXTEND %{
     }
   }
   // Otherwise, let it continue on its way -- the SCATTER call was made in ESS_butterfly
-  emitted[linear_index] += p;
+  #pragma acc atomic
+  emitted[linear_index] = emitted[linear_index] + p;
 %}
 SAVE %{
   /* SAVE runs on every MPI node -- mccode_main calls finally() on all of them and finally()
