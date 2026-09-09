@@ -65,7 +65,9 @@ ctest --test-dir build --output-on-failure
 ```
 
 The Python tests under `test/` are separate: they build and run whole McStas
-instruments through `niess`, and are driven by pytest.
+instruments, and are driven by pytest. Most need only a C compiler and skip without one;
+`test_masked_ess_butterfly.py` also needs `niess` to describe the train, and skips at
+collection when it is absent.
 
 ### Coverage
 
@@ -181,6 +183,54 @@ that list, with a count so a caller can tell an envelope spanning gaps from a si
 window; `chopper_inverse_velocity_time_mask` answers the same question against a
 histogram grid.
 
+## Spending a mask rather than throwing rays at it
+
+A mask says which `(inverse velocity, time)` cells a train can pass. The obvious thing to
+do with one in a source is to draw a ray, look it up, and absorb it if the cell is
+excluded. That is correct -- the discs would have stopped it -- and expensive: a train
+passing a few percent of the plane spends the rest of its ray budget on rays that die
+where they are born, and the run ends up with the statistics of one a fraction of its
+size.
+
+`chopper_mask_sampler` draws from the allowed cells instead. `chopper_mask_sampler_make`
+takes a finished mask and the region the caller samples uniformly; `_draw` turns three
+uniform deviates into an inverse velocity and a time inside that region, with no rejection
+and no loop. The deviates are arguments so the library needs no generator of its own and a
+caller inside a McStas TRACE can hand over its own `rand01()`.
+
+```c
+chopper_mask_sampler sampler = chopper_mask_sampler_make(
+  mask, inverse_velocity_bins, time_bins, inverse_velocity_edges, time_edges,
+  inverse_velocity_minimum, inverse_velocity_range, time_minimum, time_range);
+...
+chopper_mask_sampler_draw(&sampler, rand01(), rand01(), rand01(), &inverse_velocity, &t);
+p *= sampler.acceptance;   /* every emitted ray, redrawn or not */
+...
+chopper_mask_sampler_free(&sampler);
+```
+
+That last multiplication is not optional and not a fudge. A ray drawn from a proposal `q`
+carrying weight `w` estimates a tally as `E[T] = N E_q[w f]`, and `f` is zero outside the
+allowed set because the discs stop those rays. Restricting the draw to the allowed set
+multiplies the estimate by `1/Q`, where `Q` is the probability an unrestricted draw lands
+there, so multiplying every accepted ray's weight by `Q` puts it back exactly. `acceptance`
+is that `Q`. Two numbers it is easy to reach for instead, and neither is right:
+
+- `chopper_unmasked_probability` is the allowed fraction of a *weighted* signal, which is
+  the transmission an instrument sees. `Q` counts draws, not intensity.
+- a rejection loop's trial count does not yield it either: for a geometric number of trials
+  `k`, `E[1/k]` is not `Q`.
+
+`Q` is exact here because it is a ratio of areas, and `_make` clips every cell to the
+sampled region before weighting it -- a grid sized with `ceil` runs past that region in its
+last row and column, and weighting those cells whole would inflate the answer.
+
+It is exact only while the caller really does draw both coordinates uniformly and
+independently of everything else it samples. A source that picks its emission time from a
+window centred on the neutron's own velocity does not, and no single factor corrects that.
+`Masked_ESS_butterfly` is the worked example: `resample=1` uses the sampler, and its
+INITIALIZE refuses time focusing, which is the configuration where the independence fails.
+
 Version 4.0.0 replaced the `{speed, delay, angle, path}` and
 `{speed, delay, window_count, windows, path}` pair of structures with the single one
 above, and reversed the sign of the angle term. The field names changed with it, so a
@@ -192,5 +242,15 @@ version 3.0.0 besides. Guard where you fill a `chopper_parameters`:
 ```c
 #if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
 #error "This instrument describes choppers by edges; chopper-lib 4.0.0 or newer is required"
+#endif
+```
+
+Version 4.1.0 added `chopper_mask_sampler` and changed nothing already described, so a
+caller that only needs the structures above can keep asking for 4.0.0; one that draws from
+a mask should ask for 4.1.0.
+
+```c
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40100
+#error "This instrument draws from a chopper mask; chopper-lib 4.1.0 or newer is required"
 #endif
 ```

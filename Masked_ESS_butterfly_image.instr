@@ -73,6 +73,18 @@
 *
 *   ./Masked_ESS_butterfly_image.out -n 2000000 noise=1
 *
+* `redraw = 1` is the same mask spent differently. Instead of absorbing a ray outside the
+* allowed region the source draws it again from inside, and multiplies every ray weight by
+* the fraction of the sampled plane the mask covers. The two runs
+*
+*   ./Masked_ESS_butterfly_image.out -n 2000000 do_mask=0
+*   ./Masked_ESS_butterfly_image.out -n 2000000 redraw=1
+*
+* measure the same `transmitted_I` -- that is what the weight factor is for -- while the
+* second gets there with roughly `1/acceptance` times as many counts in it, because none of
+* its ncount was spent on rays born where the discs were shut. `emission` shows the
+* difference plainly: the first fills the frame, the second is the ribbon alone.
+*
 * `emission` then fills the frame with the sampling the mask is applied to, and
 * `transmitted` shows what the discs pass out of the whole frame, which is the ribbon the
 * mask is meant to be a coarse copy of.
@@ -110,6 +122,7 @@
 * slit_width: [m]     the pre-chopper aperture width, otherwise the full opening is always allowed to pass neutrons
 * growth: [1]         the number of mask bins to expand in each of the wavelength and emission time directions
 * do_mask: [1]        a flag to allow turning off the source masking, but not the mask calculation
+* redraw: [1]        draw an excluded ray again from inside the mask instead of absorbing it
 *
 * %E
 *******************************************************************************/
@@ -133,7 +146,8 @@ DEFINE INSTRUMENT Masked_ESS_butterfly_image(
   slit_height = 0.1,
   slit_width = 0.1,
   int growth = 1,
-  int do_mask = 1
+  int do_mask = 1,
+  int redraw = 0
 )
 
 DECLARE
@@ -229,7 +243,8 @@ COMPONENT source = Masked_ESS_butterfly(
   acc_power = 2.0, n_pulses = 1,
   choppers = train_as_doubles, chopper_count = 2,
   inverse_velocity_bin = iv_bin, time_bin = t_bin,
-  filename = "source", noise_fraction = noise, mask_grow=growth, use_mask=do_mask
+  filename = "source", noise_fraction = noise, mask_grow=growth, use_mask=do_mask,
+  resample = redraw
 ) AT (0, 0, 0) ABSOLUTE
 EXTEND
 %{

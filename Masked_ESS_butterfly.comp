@@ -18,6 +18,55 @@
 * the beam is on the disk, in degrees about its spindle, which widens every window in time
 * and is what a mask for anything but a pencil beam needs. Leave it off and the row still
 * compiles, describing the point beam it described before. See the chopper-lib README.
+*
+* <b>What the mask is spent on: `resample`</b>
+*
+* By default a ray the mask excludes is ABSORBed. That is correct -- the discs would have
+* stopped it -- but a train that passes a percent of the plane then spends ninety-nine
+* percent of `ncount` on rays that die where they were born, and the run has the statistics
+* of one a hundredth the size.
+*
+* `resample = 1` draws the excluded ray again, from inside the allowed region, instead of
+* throwing it away. This is the same measurement, not an approximation, because the source
+* samples the two coordinates the mask is drawn in uniformly and independently:
+* `lambda = Lmin + range * rand01()` with `1/v = lambda V2K / 2 pi`, and
+* `t = rand01() * tmax_multiplier * ESS_SOURCE_DURATION`. Restricting a uniform draw to a
+* region and multiplying the weight by that region's share of the whole -- chopper-lib's
+* `acceptance` -- leaves every downstream estimator unbiased. Every emitted ray is
+* multiplied by it, the ones that landed in the allowed region unaided included.
+*
+* Two things this factor is not, both easy to reach for: it is not
+* `chopper_unmasked_probability`, which is the allowed fraction of the *weighted* signal
+* and so the transmission rather than the normalisation; and it is not recoverable from
+* counting rejection attempts, since `E[1/k]` is not `1/E[k]`.
+*
+* The independence the argument rests on fails under time focusing, and INITIALIZE refuses
+* `resample` there rather than quietly biasing the answer: the emission time is then drawn
+* in a window centred on `tfocus_time - tfocus_dist / vz`, which moves with the neutron's
+* own velocity. No single factor corrects that -- but none is needed, because time focusing
+* already *is* this trick done exactly. The window traces a band of slope `-tfocus_dist` in
+* the (1/v, t) plane, which is the shape of a chopper band, and `w_tfocus` is already the
+* compensating weight. Set the three `tfocus_*` parameters from the pulse-shaping disc and
+* the source restricts itself.
+*
+* Resampling changes only how the surviving rays are drawn, never which region survives.
+* It inherits the mask's own approximations -- bin quantisation, `mask_grow`, the disc
+* `aperture` -- exactly, and adds none.
+*
+* <b>What the grid has to span</b>
+*
+* Neither of the two coordinates is read straight off the ray, and getting either wrong
+* absorbs the beam rather than masking it.
+*
+* Under time focusing the emission time is drawn in a `tfocus_width` window whose centre
+* slides with the neutron's inverse velocity, so the band it sweeps is
+* `tfocus_dist * inverse_velocity_range` longer than the window; a grid sized by
+* `tfocus_width` alone sits around the slowest neutron's window and nowhere near the rest.
+* And ESS_butterfly adds the offset of a randomly chosen pulse to `t` before this component
+* sees it, so with `n_pulses > 1` what arrives is not an emission time at all. The grid is
+* built over the whole swept band clipped to the pulse, and the pulse offset is taken back
+* off in TRACE -- which needs the emission window to be shorter than the gap between
+* pulses, so INITIALIZE checks that too.
 *******************************************************************************/
 DEFINE COMPONENT Masked_ESS_butterfly
 INHERIT ESS_butterfly
@@ -30,18 +79,21 @@ SETTING PARAMETERS (
   string filename=0,
   noise_fraction=0.0,
   int mask_grow=1,
-  int use_mask=1
+  int use_mask=1,
+  int resample=0
 )
 OUTPUT PARAMETERS ()
 SHARE INHERIT ESS_butterfly EXTEND %{
   %include "chopper-lib"
 
-#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40000
-#error "Masked_ESS_butterfly describes choppers by edges; chopper-lib 4.0.0 or newer is required"
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40100
+#error "Masked_ESS_butterfly describes choppers by edges and resamples with chopper_mask_sampler; chopper-lib 4.1.0 or newer is required"
 #endif
 %}
 DECLARE INHERIT ESS_butterfly EXTEND %{
   double * total;
+  double * emitted;
+  double * counted;
   int * mask;
   double * inverse_velocity_edges;
   double * time_edges;
@@ -51,34 +103,84 @@ DECLARE INHERIT ESS_butterfly EXTEND %{
   double inverse_velocity_range;
   double minimum_time_edge;
   double time_range;
+  double pulse_period;
+  chopper_mask_sampler mask_sampler;
 %}
 INITIALIZE INHERIT ESS_butterfly EXTEND %{
+  // Use the same minimum inverse velocity as in ESS_butterfly, which draws its wavelength
+  // uniformly and so its inverse velocity uniformly too: 1/v = lambda V2K / 2 pi exactly.
+  minimum_inverse_velocity_edge = Lmin * V2K / 2 / PI;
   inverse_velocity_range = (Lmax - Lmin) * V2K / 2 / PI;
   if (inverse_velocity_bin <= 0) inverse_velocity_bin = inverse_velocity_range;
   inverse_velocity_count = (unsigned) ceil(inverse_velocity_range / inverse_velocity_bin);
   inverse_velocity_edges = (double *) calloc(inverse_velocity_count + 1, sizeof(double));
 
-  time_range = tfocus_width > 0 ? tfocus_width : tmax_multiplier * ESS_SOURCE_DURATION;
+  /* The emission times the source can produce, which is what the grid has to span.
+   *
+   * Without time focusing ESS_butterfly draws t uniformly on [0, tmax_multiplier *
+   * ESS_SOURCE_DURATION). With it, t is drawn in a window tfocus_width wide centred on
+   * `tfocus_time - tfocus_dist / vz` -- a centre that slides with the neutron's own inverse
+   * velocity, so the band that window sweeps out is tfocus_dist * inverse_velocity_range
+   * longer than the window itself. Sizing the grid by tfocus_width alone puts it around the
+   * slowest neutron's window and nowhere near the rest, and the bounds check in TRACE then
+   * absorbs the entire beam as though the choppers had stopped it.
+   *
+   * vz rather than v, strictly, but the mask is drawn against the along-the-path inverse
+   * velocity throughout and the two differ by the direction cosine, which is 1 to a part in
+   * 1e4 for any sensible focusing rectangle.
+   *
+   * Either way the source absorbs whatever falls outside the pulse, so the reachable
+   * interval is that band clipped to it.
+   */
+  double emission_end = tmax_multiplier * ESS_SOURCE_DURATION;
+  if (tfocus_width > 0) {
+    double earliest = tfocus_time - tfocus_dist * (minimum_inverse_velocity_edge + inverse_velocity_range) - tfocus_width / 2.0;
+    double latest = tfocus_time - tfocus_dist * minimum_inverse_velocity_edge + tfocus_width / 2.0;
+    if (earliest < 0.0) earliest = 0.0;
+    if (latest > emission_end) latest = emission_end;
+    minimum_time_edge = earliest;
+    time_range = latest - earliest;
+    if (time_range <= 0.0) {
+      fprintf(stderr, "%s: the time focusing window reaches [%g, %g] s, which does not "
+                      "overlap the [0, %g] s pulse the source emits in, so nothing is "
+                      "emitted at all\n",
+              NAME_CURRENT_COMP,
+              tfocus_time - tfocus_dist * (minimum_inverse_velocity_edge + inverse_velocity_range) - tfocus_width / 2.0,
+              tfocus_time - tfocus_dist * minimum_inverse_velocity_edge + tfocus_width / 2.0,
+              emission_end);
+      exit(1);
+    }
+  } else {
+    minimum_time_edge = 0.0;
+    time_range = emission_end;
+  }
   if (time_bin <= 0) time_bin = time_range;
   time_count = (unsigned) ceil(time_range / time_bin);
   time_edges = (double *) calloc(time_count + 1, sizeof(double));
 
+  /* ESS_butterfly picks a pulse per ray and adds its offset to t, so what arrives in TRACE
+   * is not the emission time the mask is drawn against. The offset comes back off there --
+   * unambiguously, so long as the window the source emits in is shorter than the gap
+   * between pulses, which it is for any ordinary tmax_multiplier. */
+  pulse_period = 1.0 / ESS_SOURCE_FREQUENCY;
+  if (n_pulses > 1 && (minimum_time_edge < 0.0 || minimum_time_edge + time_range > pulse_period)) {
+    fprintf(stderr, "%s: with n_pulses=%d the emission window [%g, %g] s has to fit inside "
+                    "one %g s pulse period, or the offset ESS_butterfly adds to t cannot be "
+                    "told from the emission time it is added to\n",
+            NAME_CURRENT_COMP, n_pulses, minimum_time_edge,
+            minimum_time_edge + time_range, pulse_period);
+    exit(1);
+  }
+
   total = (double *) calloc(inverse_velocity_count * time_count, sizeof(double));
+  emitted = (double *) calloc(inverse_velocity_count * time_count, sizeof(double));
+  counted = (double *) calloc(inverse_velocity_count * time_count, sizeof(double));
   mask = (int *) calloc(inverse_velocity_count * time_count, sizeof(int));
 
-  if (!inverse_velocity_edges || !time_edges || !total || !mask){
+  if (!inverse_velocity_edges || !time_edges || !total || !emitted || !counted || !mask){
     fprintf(stderr, "Out of memory in %s!\n", NAME_CURRENT_COMP);
     exit(1);
   }
-  // Use the same minimum inverse velocity as in ESS_butterfly
-  minimum_inverse_velocity_edge = Lmin * V2K / 2 / PI;
-  // Use the same minimum time as in ESS_butterfly:
-  //    Except we don't know vz yet since we're in initialize, so instead use the
-  //    minimum possible vz to give the maximum tfocus_dist/vz, e.g., tfocus_dist*(1/vz)
-  //    -> use inverse_velocity_max = minimum_inverse_velocity_edge + inverse_velocity_range:
-  // Either all tfocus_* are non-zero or all are zero -- so this is only non-zero if they are all defined:
-  minimum_time_edge = tfocus_time - tfocus_dist * (inverse_velocity_range + minimum_inverse_velocity_edge) - tfocus_width/2.0;
-
   inverse_velocity_edges[0] = minimum_inverse_velocity_edge;
   time_edges[0] = minimum_time_edge;
   for (unsigned it=0; it<time_count; ++it){
@@ -86,9 +188,18 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
   }
   for (unsigned iv=0; iv<inverse_velocity_count; ++iv){
     inverse_velocity_edges[iv+1] = inverse_velocity_edges[iv] + inverse_velocity_bin;
-    for (unsigned it=0; it<time_count; ++it){
-      mask[iv * time_count + it] = CHOPPER_MASK_INCLUDED;
-      total[iv * time_count + it] = 0;
+  }
+  // The mask function overwrites every bin, but `total`, `emitted` and `counted` are
+  // accumulated into, so they start empty. Index them the way everything else does:
+  // `it * inverse_velocity_count + iv`, which is what chopper_inverse_velocity_time_mask
+  // fills and what the TRACE below reads.
+  for (unsigned it=0; it<time_count; ++it){
+    for (unsigned iv=0; iv<inverse_velocity_count; ++iv){
+      const unsigned index = it * inverse_velocity_count + iv;
+      mask[index] = CHOPPER_MASK_INCLUDED;
+      total[index] = 0;
+      emitted[index] = 0;
+      counted[index] = 0;
     }
   }
 
@@ -121,15 +232,72 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
     exit(1);
   }
 
+  /* Drawing from the allowed region instead of absorbing outside it is only the same
+   * measurement while the two mask coordinates are sampled uniformly and independently of
+   * everything else. Refuse the two configurations where they are not, rather than apply a
+   * correction that does not correct. */
+  chopper_mask_sampler_empty(&mask_sampler);
+  if (resample) {
+    if (!use_mask) {
+      fprintf(stderr, "%s: resample=1 needs use_mask=1; there is nothing to resample "
+                      "away from with the mask switched off\n", NAME_CURRENT_COMP);
+      exit(1);
+    }
+    if (noise_fraction != 0.0) {
+      fprintf(stderr, "%s: resample=1 and noise_fraction=%g are contradictory. Resampling "
+                      "emits no masked-out ray at all, so there is no leak to set a rate "
+                      "for\n", NAME_CURRENT_COMP, noise_fraction);
+      exit(1);
+    }
+    if (tfocus_width > 0) {
+      fprintf(stderr, "%s: resample=1 cannot be used with time focusing. The emission time "
+                      "is drawn in a window centred on tfocus_time - tfocus_dist/vz, which "
+                      "moves with the neutron's own velocity, so no single weight factor "
+                      "puts the restriction back.\n"
+                      "  Time focusing already does this exactly: the window is a band of "
+                      "slope -tfocus_dist in the (1/v, t) plane, the shape of a chopper "
+                      "band, and w_tfocus is the compensating weight. Set tfocus_dist, "
+                      "tfocus_time and tfocus_width from the pulse-shaping disc and leave "
+                      "resample=0.\n", NAME_CURRENT_COMP);
+      exit(1);
+    }
+    mask_sampler = chopper_mask_sampler_make(
+      mask, inverse_velocity_count, time_count,
+      inverse_velocity_edges, time_edges,
+      minimum_inverse_velocity_edge, inverse_velocity_range,
+      minimum_time_edge, time_range
+    );
+    if (mask_sampler.count == 0) {
+      fprintf(stderr, "%s: the mask allows %d bins but none of them overlap the region the "
+                      "source samples; nothing can be resampled into\n",
+              NAME_CURRENT_COMP, allowed_bin_count);
+      exit(1);
+    }
+    MPI_MASTER(
+      printf("%s: resampling into %u of %u mask cells; acceptance %.6g, so the ray weight "
+             "carries that factor and the run keeps its whole ncount\n",
+             NAME_CURRENT_COMP, mask_sampler.count,
+             inverse_velocity_count * time_count, mask_sampler.acceptance);
+    );
+  }
+
   if (!strcmp(filename,"\0")) sprintf(filename,"%s",NAME_CURRENT_COMP);
 %}
 TRACE INHERIT ESS_butterfly EXTEND %{
   // Since this is after the trace of ESS_butterfly, a neutron ray has already been selected.
 
+  // ESS_butterfly has already chosen which pulse this ray belongs to and added that pulse's
+  // offset to t. The mask is drawn against the emission time inside a single pulse, so take
+  // the offset back off before looking anything up, and put it back on anything redrawn.
+  // INITIALIZE has checked the emission window is shorter than the gap between pulses,
+  // which is what makes the split unambiguous.
+  double pulse_offset = n_pulses > 1 ? pulse_period * floor(t / pulse_period) : 0.0;
+  double t_emission = t - pulse_offset;
+
   // Decide which bin the generated neutron ray should go into:
   double inv_v = 1.0 / sqrt(vx*vx + vy*vy + vz*vz);
   unsigned inverse_velocity_index = (unsigned) floor((inv_v - minimum_inverse_velocity_edge) / inverse_velocity_bin);
-  unsigned time_index = (unsigned) floor((t - minimum_time_edge) / time_bin);
+  unsigned time_index = (unsigned) floor((t_emission - minimum_time_edge) / time_bin);
   // Bounds check to prevent out-of-bounds array access
   if (inverse_velocity_index >= inverse_velocity_count || time_index >= time_count) {
     ABSORB;
@@ -137,27 +305,110 @@ TRACE INHERIT ESS_butterfly EXTEND %{
   // this indexing must match the internal working of 'chopper_inverse_velocity_time_mask'!
   unsigned linear_index = time_index * inverse_velocity_count + inverse_velocity_index;
 
-  // Record the total probability distribution sampled
+  // Record the total probability distribution sampled, and the sampling itself. `counted`
+  // carries no weight on purpose: the acceptance the resampling corrects by counts draws,
+  // not intensity, so this is what SAVE checks it against.
   total[linear_index] += p;
+  counted[linear_index] += 1.0;
 
-  // If it is masked-out and a random choice is above the chosen threshold, absorb the ray
-  if (use_mask && mask[linear_index] == CHOPPER_MASK_EXCLUDED && rand01() > noise_fraction) {
-    ABSORB;
+  if (use_mask) {
+    if (resample) {
+      if (mask[linear_index] == CHOPPER_MASK_EXCLUDED) {
+        // Draw a fresh (inverse velocity, emission time) from inside the allowed region and
+        // rebuild everything downstream of the wavelength. The emission point, the surface
+        // it came from and the direction it was focused into are all still good -- they are
+        // sampled independently of these two coordinates -- so ESS_butterfly's own TRACE
+        // locals are reused rather than redrawn, and only the wavelength-dependent tail of
+        // its weight is repeated here.
+        chopper_mask_sampler_draw(&mask_sampler, rand01(), rand01(), rand01(), &inv_v, &t_emission);
+        lambda = inv_v * 2 * PI / V2K;  // the source's own 1/v = lambda V2K / 2 pi, inverted
+        k = 2 * PI / lambda;
+        v = K2V * k;
+        vz = v * dz / r;
+        vy = v * dy / r;
+        vx = v * dx / r;
+
+        // ESS_butterfly.comp:588-607, with dt = 0 and w_tfocus = 1 because time focusing is
+        // refused above. The brilliance is a function of the emission time, which is why the
+        // parent evaluates it before adding the pulse offset and why this does too. The
+        // Schoenfeldt functions assign the weight rather than scaling it, so p needs no
+        // initialisation.
+        if (iscold) {
+          ESS_2015_Schoenfeldt_cold(&t_emission, &p, lambda, tfocus_width, tfocus_time, dt, yheight,
+                                    Mwidth_t, yheight, Mwidth_c, tmax_multiplier,
+                                    beamportangle, modX, modY);
+          p *= c_performance;
+          p *= ColdScalars[beamline - 1];
+        } else {
+          ESS_2015_Schoenfeldt_thermal(&t_emission, &p, lambda, tfocus_width, tfocus_time, dt, yheight,
+                                       Mwidth_t, yheight, Mwidth_c, tmax_multiplier,
+                                       beamportangle, modX, modY);
+          p *= t_performance;
+          p *= ThermalScalars[beamline - 1];
+        }
+        p *= w_stat * w_focus * w_geom * w_mult * w_tfocus;
+        p *= cos_factor;
+        if (iscold) {
+          p /= cold_frac;
+        } else {
+          p /= (1 - cold_frac);
+        }
+        // The pulse this ray was assigned to is untouched by the redraw: it is chosen
+        // independently of the wavelength and the emission time, so conditioning those two
+        // on the mask leaves it exactly as ESS_butterfly drew it.
+        t = t_emission + pulse_offset;
+
+        // Re-bin the redrawn ray from its velocity, the same way the original was binned.
+        inv_v = 1.0 / sqrt(vx*vx + vy*vy + vz*vz);
+        inverse_velocity_index = (unsigned) floor((inv_v - minimum_inverse_velocity_edge) / inverse_velocity_bin);
+        time_index = (unsigned) floor((t_emission - minimum_time_edge) / time_bin);
+        if (inverse_velocity_index >= inverse_velocity_count || time_index >= time_count) {
+          ABSORB;  // the sampler draws inside the grid, so this is unreachable short of a bug
+        }
+        linear_index = time_index * inverse_velocity_count + inverse_velocity_index;
+      }
+      // Every emitted ray pays the acceptance, whether it needed redrawing or not: the ones
+      // that landed inside the allowed region on their own are a draw from the same
+      // restricted distribution, and carry the same correction.
+      p *= mask_sampler.acceptance;
+    } else if (mask[linear_index] == CHOPPER_MASK_EXCLUDED && rand01() > noise_fraction) {
+      // Masked-out, and the noise leak did not save it
+      ABSORB;
+    }
   }
   // Otherwise, let it continue on its way -- the SCATTER call was made in ESS_butterfly
+  emitted[linear_index] += p;
 %}
 SAVE %{
   // Now we can find the probability reduction due to our mask
   double relative_probability = chopper_unmasked_probability(total, mask, inverse_velocity_count, time_count);
 
+  /* The acceptance the resampling corrects by is the share of *draws* that land in the
+   * allowed region, and `counted` is exactly that share measured. It is computed from the
+   * mask's geometry and never from the run, so this is an independent check on the factor
+   * every emitted ray was multiplied by rather than a restatement of it. */
+  if (resample) {
+    double measured = chopper_unmasked_probability(counted, mask, inverse_velocity_count, time_count);
+    MPI_MASTER(
+      printf("%s: mask acceptance %.6g, sampled %.6g; weighted transmission %.6g\n",
+             NAME_CURRENT_COMP, mask_sampler.acceptance, measured, relative_probability);
+    );
+  }
+
   // dirname is a McCode defined static global variable, and MC_PATHSEP_S is a McCode defined macro for the path separator as a string literal
   chopper_write_mask_to_file(dirname, filename, ".mask", MC_PATHSEP_S, mask, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
   chopper_write_total_to_file(dirname, filename, ".total", MC_PATHSEP_S, total, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
+  // What actually left the moderator, on the same grid: the same picture as `.total` with
+  // `resample=0`, and the allowed region alone with `resample=1`.
+  chopper_write_total_to_file(dirname, filename, ".emitted", MC_PATHSEP_S, emitted, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
 %}
 FINALLY %{
   if (total) free(total);
+  if (emitted) free(emitted);
+  if (counted) free(counted);
   if (mask) free(mask);
   if (inverse_velocity_edges) free(inverse_velocity_edges);
   if (time_edges) free(time_edges);
+  chopper_mask_sampler_free(&mask_sampler);
 %}
 END
