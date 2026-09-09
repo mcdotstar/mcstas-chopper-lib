@@ -747,7 +747,11 @@ static FILE * chopper_open_file_for_writing(
     // need to add the extension
     sprintf(filepath + strlen(filepath), "%s", extension);
   }
-  FILE * file = fopen(filepath, "a");
+  /* Truncating, not appending. A caller may write the same grid more than once in a run --
+   * McStas saves on SIGUSR2 and carries on, then saves again at the end -- and appending
+   * leaves the second copy nose to tail with the first in one file, which reads as a single
+   * grid of twice the rows. */
+  FILE * file = fopen(filepath, "w");
   if (file == NULL) {
     printf("Could not open file %s for writing\n", filepath);
   }

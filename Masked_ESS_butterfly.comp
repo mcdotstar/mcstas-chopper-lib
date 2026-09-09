@@ -49,6 +49,20 @@
 * compensating weight. Set the three `tfocus_*` parameters from the pulse-shaping disc and
 * the source restricts itself.
 *
+* <b>Under MPI</b>
+*
+* The three grids this component keeps are summed across the nodes in SAVE and written by
+* master alone -- every node runs SAVE, and they all share one output directory, so
+* ungated writes would put one interleaved copy per node into each file. The acceptance is
+* not summed and must not be: it comes from the mask's geometry, so every node has the same
+* number already. Nor is anything divided by the node count, because the ray weights carry
+* one over the *whole* run's ncount: ESS_butterfly reads mcget_ncount() in INITIALIZE,
+* which mccode_main runs before it slices ncount across the nodes.
+*
+* MPI is the only parallelism this is safe under. The grids are accumulated with a bare
+* `+=` from TRACE, which is a data race between OpenACC threads and merely separate memory
+* between MPI nodes.
+*
 * Resampling changes only how the surviving rays are drawn, never which region survives.
 * It inherits the mask's own approximations -- bin quantisation, `mask_grow`, the disc
 * `aperture` -- exactly, and adds none.
@@ -141,13 +155,15 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
     minimum_time_edge = earliest;
     time_range = latest - earliest;
     if (time_range <= 0.0) {
-      fprintf(stderr, "%s: the time focusing window reaches [%g, %g] s, which does not "
-                      "overlap the [0, %g] s pulse the source emits in, so nothing is "
-                      "emitted at all\n",
-              NAME_CURRENT_COMP,
-              tfocus_time - tfocus_dist * (minimum_inverse_velocity_edge + inverse_velocity_range) - tfocus_width / 2.0,
-              tfocus_time - tfocus_dist * minimum_inverse_velocity_edge + tfocus_width / 2.0,
-              emission_end);
+      MPI_MASTER(
+        fprintf(stderr, "%s: the time focusing window reaches [%g, %g] s, which does not "
+                        "overlap the [0, %g] s pulse the source emits in, so nothing is "
+                        "emitted at all\n",
+                NAME_CURRENT_COMP,
+                tfocus_time - tfocus_dist * (minimum_inverse_velocity_edge + inverse_velocity_range) - tfocus_width / 2.0,
+                tfocus_time - tfocus_dist * minimum_inverse_velocity_edge + tfocus_width / 2.0,
+                emission_end);
+      );
       exit(1);
     }
   } else {
@@ -164,11 +180,13 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
    * between pulses, which it is for any ordinary tmax_multiplier. */
   pulse_period = 1.0 / ESS_SOURCE_FREQUENCY;
   if (n_pulses > 1 && (minimum_time_edge < 0.0 || minimum_time_edge + time_range > pulse_period)) {
-    fprintf(stderr, "%s: with n_pulses=%d the emission window [%g, %g] s has to fit inside "
-                    "one %g s pulse period, or the offset ESS_butterfly adds to t cannot be "
-                    "told from the emission time it is added to\n",
-            NAME_CURRENT_COMP, n_pulses, minimum_time_edge,
-            minimum_time_edge + time_range, pulse_period);
+    MPI_MASTER(
+      fprintf(stderr, "%s: with n_pulses=%d the emission window [%g, %g] s has to fit inside "
+                      "one %g s pulse period, or the offset ESS_butterfly adds to t cannot be "
+                      "told from the emission time it is added to\n",
+              NAME_CURRENT_COMP, n_pulses, minimum_time_edge,
+              minimum_time_edge + time_range, pulse_period);
+    );
     exit(1);
   }
 
@@ -178,7 +196,14 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
   mask = (int *) calloc(inverse_velocity_count * time_count, sizeof(int));
 
   if (!inverse_velocity_edges || !time_edges || !total || !emitted || !counted || !mask){
+    /* Unlike every other failure here this one is a single node's own news, so it is printed
+     * unreduced -- the node that ran out may not be master -- and it aborts the job rather
+     * than calling exit, which under MPI means MPI_Finalize: finalizing alone while the
+     * other nodes are still working leaves them waiting in the next collective forever. */
     fprintf(stderr, "Out of memory in %s!\n", NAME_CURRENT_COMP);
+#ifdef USE_MPI
+    MPI_Abort(MPI_COMM_WORLD, -1);
+#endif
     exit(1);
   }
   inverse_velocity_edges[0] = minimum_inverse_velocity_edge;
@@ -211,10 +236,12 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
   for (int ci = 0; ci < chopper_count; ++ci) {
     if (chop_pars[ci].edge_count < 2 || chop_pars[ci].edge_count % 2
         || chop_pars[ci].edges == NULL) {
-      fprintf(stderr, "%s: chopper %d has %u edges at %p; each opening needs two, and "
-                      "chopper-lib 4.0.0 takes {speed, delay, beam, edge_count, edges, "
-                      "path}\n",
-              NAME_CURRENT_COMP, ci, chop_pars[ci].edge_count, (void *) chop_pars[ci].edges);
+      MPI_MASTER(
+        fprintf(stderr, "%s: chopper %d has %u edges at %p; each opening needs two, and "
+                        "chopper-lib 4.0.0 takes {speed, delay, beam, edge_count, edges, "
+                        "path}\n",
+                NAME_CURRENT_COMP, ci, chop_pars[ci].edge_count, (void *) chop_pars[ci].edges);
+      );
       exit(1);
     }
   }
@@ -228,7 +255,9 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
   );
 
   if (allowed_bin_count < 1){
-    fprintf(stderr, "Choppers allow no transmission from %s!", NAME_CURRENT_COMP);
+    MPI_MASTER(
+      fprintf(stderr, "Choppers allow no transmission from %s!", NAME_CURRENT_COMP);
+    );
     exit(1);
   }
 
@@ -239,26 +268,32 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
   chopper_mask_sampler_empty(&mask_sampler);
   if (resample) {
     if (!use_mask) {
-      fprintf(stderr, "%s: resample=1 needs use_mask=1; there is nothing to resample "
-                      "away from with the mask switched off\n", NAME_CURRENT_COMP);
+      MPI_MASTER(
+        fprintf(stderr, "%s: resample=1 needs use_mask=1; there is nothing to resample "
+                        "away from with the mask switched off\n", NAME_CURRENT_COMP);
+      );
       exit(1);
     }
     if (noise_fraction != 0.0) {
-      fprintf(stderr, "%s: resample=1 and noise_fraction=%g are contradictory. Resampling "
-                      "emits no masked-out ray at all, so there is no leak to set a rate "
-                      "for\n", NAME_CURRENT_COMP, noise_fraction);
+      MPI_MASTER(
+        fprintf(stderr, "%s: resample=1 and noise_fraction=%g are contradictory. Resampling "
+                        "emits no masked-out ray at all, so there is no leak to set a rate "
+                        "for\n", NAME_CURRENT_COMP, noise_fraction);
+      );
       exit(1);
     }
     if (tfocus_width > 0) {
-      fprintf(stderr, "%s: resample=1 cannot be used with time focusing. The emission time "
-                      "is drawn in a window centred on tfocus_time - tfocus_dist/vz, which "
-                      "moves with the neutron's own velocity, so no single weight factor "
-                      "puts the restriction back.\n"
-                      "  Time focusing already does this exactly: the window is a band of "
-                      "slope -tfocus_dist in the (1/v, t) plane, the shape of a chopper "
-                      "band, and w_tfocus is the compensating weight. Set tfocus_dist, "
-                      "tfocus_time and tfocus_width from the pulse-shaping disc and leave "
-                      "resample=0.\n", NAME_CURRENT_COMP);
+      MPI_MASTER(
+        fprintf(stderr, "%s: resample=1 cannot be used with time focusing. The emission time "
+                        "is drawn in a window centred on tfocus_time - tfocus_dist/vz, which "
+                        "moves with the neutron's own velocity, so no single weight factor "
+                        "puts the restriction back.\n"
+                        "  Time focusing already does this exactly: the window is a band of "
+                        "slope -tfocus_dist in the (1/v, t) plane, the shape of a chopper "
+                        "band, and w_tfocus is the compensating weight. Set tfocus_dist, "
+                        "tfocus_time and tfocus_width from the pulse-shaping disc and leave "
+                        "resample=0.\n", NAME_CURRENT_COMP);
+      );
       exit(1);
     }
     mask_sampler = chopper_mask_sampler_make(
@@ -268,9 +303,11 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
       minimum_time_edge, time_range
     );
     if (mask_sampler.count == 0) {
-      fprintf(stderr, "%s: the mask allows %d bins but none of them overlap the region the "
-                      "source samples; nothing can be resampled into\n",
-              NAME_CURRENT_COMP, allowed_bin_count);
+      MPI_MASTER(
+        fprintf(stderr, "%s: the mask allows %d bins but none of them overlap the region the "
+                        "source samples; nothing can be resampled into\n",
+                NAME_CURRENT_COMP, allowed_bin_count);
+      );
       exit(1);
     }
     MPI_MASTER(
@@ -380,27 +417,85 @@ TRACE INHERIT ESS_butterfly EXTEND %{
   emitted[linear_index] += p;
 %}
 SAVE %{
+  /* SAVE runs on every MPI node -- mccode_main calls finally() on all of them and finally()
+   * calls save() unconditionally -- so the reduction below is reached everywhere, which it
+   * has to be: mc_MPI_Sum is a collective MPI_Allreduce and a master-only call deadlocks.
+   * Only the file writing is master's alone. It has to be: mcuse_dir hands every node the
+   * same output directory, so without the gate every node writes the same three paths. */
+  double * total_all = total;
+  double * emitted_all = emitted;
+  double * counted_all = counted;
+  const unsigned mask_cells = inverse_velocity_count * time_count;
+
+#ifdef USE_MPI
+  if (mpi_node_count > 1) {
+    /* Reduced into scratch rather than in place. mc_MPI_Sum copies its answer back over the
+     * buffer it was handed, and SAVE is not called once per run: SIGUSR2 saves and *resumes*,
+     * and finally() then saves again. Reducing the accumulators in place would leave the
+     * second save reducing already-reduced data, once per node all over again. */
+    total_all = (double *) calloc(mask_cells, sizeof(double));
+    emitted_all = (double *) calloc(mask_cells, sizeof(double));
+    counted_all = (double *) calloc(mask_cells, sizeof(double));
+    if (!total_all || !emitted_all || !counted_all) {
+      /* Out of memory is this node's own news, so it says so itself rather than leaving it
+       * to master, and aborts the job rather than calling exit -- which under MPI means
+       * MPI_Finalize, and finalizing alone while the others are still working hangs them. */
+      fprintf(stderr, "%s: out of memory reducing %u mask cells on node %i\n",
+              NAME_CURRENT_COMP, mask_cells, mpi_node_rank);
+      MPI_Abort(MPI_COMM_WORLD, -1);
+    }
+    memcpy(total_all, total, mask_cells * sizeof(double));
+    memcpy(emitted_all, emitted, mask_cells * sizeof(double));
+    memcpy(counted_all, counted, mask_cells * sizeof(double));
+    /* Summed and not averaged. The ray weights already carry w_stat = 1/mcget_ncount(), and
+     * ESS_butterfly reads that in INITIALIZE -- which runs before mccode_main slices ncount
+     * across the nodes -- so every node weights by one over the *whole* run's count while
+     * emitting its own share of the rays. The sum over nodes is the whole-run answer, which
+     * is why mcdetector_import divides by mpi_node_count only for a detector carrying no
+     * count array, and ours carries one. */
+    mc_MPI_Sum(total_all, mask_cells);
+    mc_MPI_Sum(emitted_all, mask_cells);
+    mc_MPI_Sum(counted_all, mask_cells);
+  }
+#endif
+
   // Now we can find the probability reduction due to our mask
-  double relative_probability = chopper_unmasked_probability(total, mask, inverse_velocity_count, time_count);
+  double relative_probability = chopper_unmasked_probability(total_all, mask, inverse_velocity_count, time_count);
 
   /* The acceptance the resampling corrects by is the share of *draws* that land in the
    * allowed region, and `counted` is exactly that share measured. It is computed from the
    * mask's geometry and never from the run, so this is an independent check on the factor
-   * every emitted ray was multiplied by rather than a restatement of it. */
-  if (resample) {
-    double measured = chopper_unmasked_probability(counted, mask, inverse_velocity_count, time_count);
-    MPI_MASTER(
-      printf("%s: mask acceptance %.6g, sampled %.6g; weighted transmission %.6g\n",
-             NAME_CURRENT_COMP, mask_sampler.acceptance, measured, relative_probability);
-    );
-  }
+   * every emitted ray was multiplied by rather than a restatement of it.
+   *
+   * The acceptance itself is not reduced and must not be: it is a function of the mask
+   * geometry alone, so every node computes the same number, and summing it would scale every
+   * ray weight in the run by the node count. Only the measured figure is a node's own share.
+   *
+   * The draw count is reported alongside because it is the cheapest check that the reduction
+   * happened at all: it is the whole run's ncount, never a single node's slice of it. */
+  double draws = 0.0;
+  for (unsigned i = 0; i < mask_cells; ++i) draws += counted_all[i];
+  MPI_MASTER(
+    printf("%s: mask acceptance %.6g, sampled %.6g over %g draws; weighted transmission %.6g\n",
+           NAME_CURRENT_COMP, mask_sampler.acceptance,
+           chopper_unmasked_probability(counted_all, mask, inverse_velocity_count, time_count),
+           draws, relative_probability);
 
-  // dirname is a McCode defined static global variable, and MC_PATHSEP_S is a McCode defined macro for the path separator as a string literal
-  chopper_write_mask_to_file(dirname, filename, ".mask", MC_PATHSEP_S, mask, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
-  chopper_write_total_to_file(dirname, filename, ".total", MC_PATHSEP_S, total, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
-  // What actually left the moderator, on the same grid: the same picture as `.total` with
-  // `resample=0`, and the allowed region alone with `resample=1`.
-  chopper_write_total_to_file(dirname, filename, ".emitted", MC_PATHSEP_S, emitted, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
+    // dirname is a McCode defined static global variable, and MC_PATHSEP_S is a McCode defined macro for the path separator as a string literal
+    chopper_write_mask_to_file(dirname, filename, ".mask", MC_PATHSEP_S, mask, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
+    chopper_write_total_to_file(dirname, filename, ".total", MC_PATHSEP_S, total_all, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
+    // What actually left the moderator, on the same grid: the same picture as `.total` with
+    // `resample=0`, and the allowed region alone with `resample=1`.
+    chopper_write_total_to_file(dirname, filename, ".emitted", MC_PATHSEP_S, emitted_all, inverse_velocity_count, time_count, inverse_velocity_edges, time_edges);
+  );
+
+#ifdef USE_MPI
+  if (mpi_node_count > 1) {
+    free(total_all);
+    free(emitted_all);
+    free(counted_all);
+  }
+#endif
 %}
 FINALLY %{
   if (total) free(total);
