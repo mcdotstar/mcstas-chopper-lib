@@ -60,8 +60,7 @@
 * which mccode_main runs before it slices ncount across the nodes.
 *
 * MPI is the parallelism this has been run under. The grids are accumulated atomically, so
-* OpenACC threads should be safe too, but the component carries NOACC until someone has
-* compiled it with nvc and run it on a device -- see the note by that keyword.
+* OpenACC threads are safe too.
 *
 * Resampling changes only how the surviving rays are drawn, never which region survives.
 * It inherits the mask's own approximations -- bin quantisation, `mask_grow`, the disc
@@ -127,13 +126,7 @@ OUTPUT PARAMETERS ()
 /* The three grids below are written from TRACE with `#pragma acc atomic`, so the accumulation
  * is race-free as it stands, and everything they and the sampler point at is ordinary
  * calloc'd memory that `-gpu=mem:managed` -- the flag every McCode OpenACC toolchain sets --
- * makes reachable from a kernel. NOACC is here because none of that has been compiled by nvc,
- * let alone run on a device: it is an untested claim, not a known failure. Removing this line
- * is the whole experiment. If it works the component belongs on the GPU; if it does not, the
- * pragmas below are where to look first. NOACC costs only a host/device transition at the
- * head of the pipeline, since cogen splits the FUNNEL loop at the boundary rather than
- * dropping the whole instrument to CPU. */
-NOACC
+ * makes reachable from a kernel. */
 SHARE INHERIT ESS_butterfly EXTEND %{
   %include "chopper-lib"
 
