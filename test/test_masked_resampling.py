@@ -182,7 +182,7 @@ def test_the_acceptance_is_the_fraction_of_draws_it_claims(image):
     agree only if that claim is right.
     """
     completed = image(lambda_0=LAMBDA_0, redraw=1)
-    match = re.search(r'mask acceptance ([\d.eE+-]+), sampled ([\d.eE+-]+)', completed.stdout)
+    match = re.search(r'mask acceptance ([\d.eE+-]+); sampled ([\d.eE+-]+)', completed.stdout)
     assert match is not None, completed.stdout
     acceptance, sampled = float(match.group(1)), float(match.group(2))
 
