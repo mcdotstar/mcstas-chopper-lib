@@ -126,7 +126,11 @@ OUTPUT PARAMETERS ()
 /* The three grids below are written from TRACE with `#pragma acc atomic`, so the accumulation
  * is race-free as it stands, and everything they and the sampler point at is ordinary
  * calloc'd memory that `-gpu=mem:managed` -- the flag every McCode OpenACC toolchain sets --
- * makes reachable from a kernel. */
+ * makes reachable from a kernel. That covers the bytes; it does not cover the *pointer
+ * fields* themselves in this component's device-resident twin, which McStas's own generated
+ * `update device(...)` only shallow-copies -- so INITIALIZE attaches each one explicitly with
+ * `acc_attach`, the same fix `off_init` elsewhere in the generated file uses for its own
+ * malloc'd mesh arrays. */
 SHARE INHERIT ESS_butterfly EXTEND %{
   %include "chopper-lib"
 
@@ -295,6 +299,16 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
     exit(1);
   }
 
+  /* mask/total/emitted/counted are read or written from TRACE, which runs on the GPU; attach
+   * their pointer fields so the device-resident twin of this component points at them, the
+   * same fix `off_init` uses for its own malloc'd mesh arrays elsewhere in this file. */
+  #ifdef OPENACC
+  acc_attach((void *)&mask);
+  if (save_total)          acc_attach((void *)&total);
+  if (save_emitted)        acc_attach((void *)&emitted);
+  if (save_or_verify_count) acc_attach((void *)&counted);
+  #endif
+
   /* Drawing from the allowed region instead of absorbing outside it is only the same
    * measurement while the two mask coordinates are sampled uniformly and independently of
    * everything else. Refuse the two configurations where they are not, rather than apply a
@@ -344,6 +358,16 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
       );
       exit(1);
     }
+    // Same reason as mask/total/etc above: chopper_mask_sampler_draw is `#pragma acc routine
+    // seq` and runs on the GPU, so mask_sampler's five calloc'd arrays need their pointer
+    // fields attached too.
+    #ifdef OPENACC
+    acc_attach((void *)&mask_sampler.cumulative);
+    acc_attach((void *)&mask_sampler.inverse_velocity_low);
+    acc_attach((void *)&mask_sampler.inverse_velocity_width);
+    acc_attach((void *)&mask_sampler.time_low);
+    acc_attach((void *)&mask_sampler.time_width);
+    #endif
     MPI_MASTER(
       printf("%s: resampling into %u of %u mask cells; acceptance %.6g, so the ray weight "
              "carries that factor and the run keeps its whole ncount\n",

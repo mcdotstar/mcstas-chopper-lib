@@ -100,6 +100,9 @@ double along_x;      /* unit vector spindle -> beam crossing */
 double along_y;
 double across_x;     /* and its perpendicular, the sense angles increase in */
 double across_y;
+/* TRACE's own copy of slit_edges, fixed-size so it travels as a value with the
+ * rest of the struct instead of as a pointer OpenACC has to chase; see INITIALIZE. */
+double edges[64];
 %}
 
 INITIALIZE
@@ -117,6 +120,19 @@ INITIALIZE
     }
     if (slit_edges[n_edges - 1] - slit_edges[0] >= 360.0) {
         nx_disk_chopper_error(NAME_CURRENT_COMP, "slit_edges span a full turn or more");
+    }
+
+    /* slit_edges is a `vector` SETTING PARAMETER, i.e. a bare pointer into memory
+     * this component does not own (the instrument's near_edges/far_edges). TRACE
+     * runs on the GPU and McStas only shallow-copies this component's struct to
+     * the device, which does not make that pointer dereferencable there. Copy the
+     * values into edges[], an ordinary fixed-size array member instead, which the
+     * shallow copy carries correctly, and have TRACE read that. */
+    if (n_edges > 64) {
+        nx_disk_chopper_error(NAME_CURRENT_COMP, "slit_edges holds more openings than this build supports (max 64)");
+    }
+    for (int i = 0; i < n_edges; ++i) {
+        edges[i] = slit_edges[i];
     }
 
     /* Where the rim stands at the edge of the beam window, rather than on the axis.
@@ -204,8 +220,8 @@ TRACE
 
         int through = 0;
         for (int i = 0; i < n_edges; i += 2) {
-            double opening = nx_disk_chopper_wrap(slit_edges[i]);
-            double width = slit_edges[i + 1] - slit_edges[i];
+            double opening = nx_disk_chopper_wrap(edges[i]);
+            double width = edges[i + 1] - edges[i];
             /* measured from this opening's leading edge, so a slit spanning the zero
              * mark needs no special case */
             if (nx_disk_chopper_wrap(on_disc - opening) < width) {
