@@ -71,6 +71,19 @@ Nothing is removed: the window and mask functions are unchanged and still the ri
 when a grid is what you want, or when the over-estimate is harmless and you would rather
 not carry a polygon set around.
 
+`Polygon_ESS_butterfly` is the worked example -- `Masked_ESS_butterfly` over the exact
+region rather than a grid of it, and the two are worth running side by side.
+`Polygon_ESS_butterfly_image` photographs what each emits. For the two-disc train those
+instruments default to, the grid reports an acceptance of 0.290 from 8772 cells where the
+region is 0.245 from two triangles: 18% high, and high is the only direction a grid can be
+wrong in, since a partly covered cell is kept whole.
+
+What the polygon component gives up is the pictures. `Masked_ESS_butterfly` accumulates
+the sampled and emitted probability on its mask grid; there is no grid to accumulate them
+on here, and a triangulation is not a sensible thing to histogram into. Two scalar
+counters take their place -- rays drawn, and rays landing in the region -- whose ratio is
+the acceptance measured from the run rather than from the geometry.
+
 ### Sampling it
 
 `chopper_polygon_sampler` does the same job as `chopper_mask_sampler`, in the same shape —

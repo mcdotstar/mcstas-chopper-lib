@@ -1,0 +1,567 @@
+/*******************************************************************************
+* Component: Polygon_ESS_butterfly
+*
+* An ESS_butterfly source that emits only where a chopper train lets neutrons through,
+* using the exact transmitted region rather than a grid approximation of it.
+*
+* <b>What this is, next to Masked_ESS_butterfly</b>
+*
+* `Masked_ESS_butterfly` asks `chopper_inverse_velocity_time_mask` which (inverse
+* velocity, emission time) *bins* a neutron could pass through. That answer is quantised
+* twice over: a channel thinner than a bin is lost, and a bin the region only partly
+* covers is kept whole, so the accepted area -- and with it the `acceptance` a resampled
+* ray's weight is corrected by -- comes out high. The error falls only as fast as the cell
+* count, so halving it costs four times the memory.
+*
+* This component asks `chopper_polygon_set_transmit_train` for the region itself. A
+* neutron emitted at inverse velocity `a` and time `t` reaches path `L` at `t + L*a`, so a
+* disc open on `[lower, upper]` accepts `lower <= t + L*a <= upper`: a slab between two
+* parallel lines. A train's acceptance is an intersection of unions of such slabs, and
+* intersection distributes over union, so the exact region is a union of convex polygons --
+* one per choice of which opening and which turn of each disc a neutron goes through.
+* Nothing is quantised and nothing is approximated. For a six-disc train it is typically
+* one polygon of five or six vertices, so the per-ray test is a handful of arithmetic.
+*
+* What is given up is the pictures. `Masked_ESS_butterfly` accumulates `total`, `emitted`
+* and `count` on its mask grid; there is no grid here to accumulate them on, and a
+* triangulation is not a sensible thing to histogram into. Use `Masked_ESS_butterfly` when
+* those images are what you are after. What remains, and is cheaper, is two scalar
+* counters: how many rays were drawn and how many landed in the region. Their ratio is the
+* acceptance measured from the run, which the geometry computes independently, so the two
+* agreeing is a real check rather than a restatement.
+*
+* Parameters that mean the same thing carry the same name. `use_mask` is `use_region`,
+* there being no mask; `inverse_velocity_bin`, `time_bin` and `mask_grow` describe a grid
+* and are gone; `save_mask`, `save_total`, `save_emitted`, `save_count` and `verify_count`
+* are replaced by `save_polygons` and `verify_acceptance`.
+*
+* <b>Describing the train</b>
+*
+* `choppers` is a `chopper_parameters` array reinterpreted as `double *`, which is the
+* only pointer a McStas SETTING PARAMETER can carry:
+*
+*   double edges[] = {-1.8, 1.8};
+*   chopper_parameters pars[] = {{14.0, 0.02, 0.0, 2, edges, 10.0, 4.0}};
+*   chopper_ptr = (double *) pars;
+*   chopper_cnt = sizeof(pars) / sizeof(chopper_parameters);
+*
+* `edges` is a flat, increasing list of angles in degrees, two per opening, in the disc's
+* own frame; `beam` is the angle on the beam path at `delay`; and `aperture` is how wide
+* the beam is on the disc, in degrees about its spindle, which widens every window in time
+* and is what anything but a pencil beam needs. See the chopper-lib README.
+*
+* <b>A guide that is not a straight line: `path_spread_fraction`</b>
+*
+* A neutron in a guide travels further than the straight line, and how much further
+* depends on where it bounced. The deviation is in *path*, so what it does to an arrival
+* time is `deviation * inverse_velocity` -- larger for a slow neutron, and nothing at all
+* to the inverse velocity. It therefore does not grow the region evenly; it tilts one of
+* the two lines bounding each slab, opening it into a wedge. `path_spread_fraction` is
+* that deviation as a fraction of each disc's own flight path, since it accumulates along
+* the way: 1e-4 is a realistic figure and 0, the default, is the straight line.
+*
+* Like `aperture` it gives a *support* rather than a distribution: a ray is passed if some
+* path in `[path, path * (1 + path_spread_fraction)]` would have got it through, with no
+* weighting over which. A spread wide enough to reach from one turn of a disc into the
+* next is refused by chopper-lib rather than silently double-counted.
+*
+* <b>What the region is spent on: `resample`</b>
+*
+* By default a ray outside the region is ABSORBed. That is correct -- the discs would have
+* stopped it -- but a train that passes a percent of the plane then spends ninety-nine
+* percent of `ncount` on rays that die where they were born, and the run has the statistics
+* of one a hundredth the size.
+*
+* `resample = 1` draws the excluded ray again, from inside the region, instead of throwing
+* it away. This is the same measurement, not an approximation, because the source samples
+* the two coordinates uniformly and independently: `lambda = Lmin + range * rand01()` with
+* `1/v = lambda V2K / 2 pi`, and `t = rand01() * tmax_multiplier * ESS_SOURCE_DURATION`.
+* Restricting a uniform draw to a region and multiplying the weight by that region's share
+* of the whole -- chopper-lib's `acceptance` -- leaves every downstream estimator unbiased.
+* Every emitted ray is multiplied by it, the ones that landed in the region unaided
+* included.
+*
+* Here that share is exact: both areas are known in closed form rather than counted in
+* cells, so unlike the mask sampler's it neither over-estimates nor depends on a
+* resolution.
+*
+* Two things this factor is not, both easy to reach for: it is not the transmission, which
+* is the allowed fraction of the *weighted* signal; and it is not recoverable from counting
+* rejection attempts, since `E[1/k]` is not `1/E[k]`.
+*
+* The independence the argument rests on fails under time focusing, and INITIALIZE refuses
+* `resample` there rather than quietly biasing the answer: the emission time is then drawn
+* in a window centred on `tfocus_time - tfocus_dist / vz`, which moves with the neutron's
+* own velocity. No single factor corrects that -- but none is needed, because time focusing
+* already *is* this trick done exactly. The window traces a band of slope `-tfocus_dist` in
+* the (1/v, t) plane, which is the shape of a chopper band, and `w_tfocus` is already the
+* compensating weight. Set the three `tfocus_*` parameters from the pulse-shaping disc and
+* the source restricts itself.
+*
+* <b>Under MPI</b>
+*
+* The two counters are summed across the nodes in SAVE and the file is written by master
+* alone -- every node runs SAVE, and they all share one output directory, so an ungated
+* write would put one copy per node into the file. The acceptance is not summed and must
+* not be: it comes from the region's geometry, so every node has the same number already.
+* Nor is anything divided by the node count, because the counters count draws rather than
+* carrying weights.
+*
+* The counters are accumulated atomically, so OpenACC threads are safe too -- but they are
+* two addresses every thread contends for, which a GPU feels more than a grid's worth of
+* cells. Set `verify_acceptance=0` if that shows up in a profile; nothing else depends on
+* them.
+*
+* <b>What the region has to span</b>
+*
+* Neither of the two coordinates is read straight off the ray, and getting either wrong
+* absorbs the beam rather than shaping it.
+*
+* Under time focusing the emission time is drawn in a `tfocus_width` window whose centre
+* slides with the neutron's inverse velocity, so the band it sweeps is
+* `tfocus_dist * inverse_velocity_range` longer than the window; a region sized by
+* `tfocus_width` alone sits around the slowest neutron's window and nowhere near the rest.
+* And ESS_butterfly adds the offset of a randomly chosen pulse to `t` before this component
+* sees it, so with `n_pulses > 1` what arrives is not an emission time at all. The sampled
+* rectangle is built over the whole swept band clipped to the pulse, and the pulse offset
+* is taken back off in TRACE -- which needs the emission window to be shorter than the gap
+* between pulses, so INITIALIZE checks that too.
+*
+* <b>Output</b>
+*
+* `save_polygons=1` writes `{filename}.json`: the sampled rectangle, the transmitted area,
+* the acceptance, the inverse velocity bands, and every polygon's vertices, each number
+* with enough digits to read back bit-exact. A few hundred bytes rather than the few
+* megabytes a mask of any useful resolution costs.
+*
+* %P
+* INPUT PARAMETERS:
+*
+* choppers: [chopper_parameters,...]  information about the chopper train (see above)
+* chopper_count: [1]                  the number of choppers described
+* filename: [str]                     the base name of any output file, replaced by NAME_CURRENT_COMP if missing
+* path_spread_fraction: [1]           extra flight path available to a ray, as a fraction of each disc's own path
+* noise_fraction: [1.]                accept out-of-region rays with this probability
+* use_region: [1]                     use (1) or do not use (0) the transmitted region to limit source emission
+* resample: [1]                       draw (1/v, t) directly from the region, 100% ray emission from source
+* save_polygons: [1]                  output the transmitted region as {filename}.json
+* verify_acceptance: [1]              count drawn rays and those landing in the region, and report the ratio --
+*                                     the acceptance that resample=1 corrects every ray weight by, measured from
+*                                     the run rather than from the geometry, so the two agreeing is a real check
+*
+* %L
+* chopper-lib: https://github.com/mcdotstar/mcstas-chopper-lib
+*
+* %E
+*******************************************************************************/
+DEFINE COMPONENT Polygon_ESS_butterfly
+INHERIT ESS_butterfly
+DEFINITION PARAMETERS ()
+SETTING PARAMETERS (
+  double * choppers,
+  int chopper_count,
+  string filename=0,
+  path_spread_fraction=0.0,
+  noise_fraction=0.0,
+  int use_region=1,
+  int resample=0,
+  int save_polygons=1,
+  int verify_acceptance=1
+)
+OUTPUT PARAMETERS ()
+/* The two counters below are written from TRACE with `#pragma acc atomic`, so the
+ * accumulation is race-free as it stands, and everything the region and the sampler point
+ * at is ordinary calloc'd memory that `-gpu=mem:managed` -- the flag every McCode OpenACC
+ * toolchain sets -- makes reachable from a kernel. That covers the bytes; it does not cover
+ * the *pointer fields* themselves in this component's device-resident twin, which McStas's
+ * own generated `update device(...)` only shallow-copies -- so INITIALIZE attaches each one
+ * explicitly with `acc_attach`, the same fix `off_init` elsewhere in the generated file uses
+ * for its own malloc'd mesh arrays. */
+SHARE INHERIT ESS_butterfly EXTEND %{
+  %include "chopper-lib"
+
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40200
+#error "Polygon_ESS_butterfly builds the transmitted region as polygons; chopper-lib 4.2.0 or newer is required"
+#endif
+%}
+DECLARE INHERIT ESS_butterfly EXTEND %{
+  chopper_polygon_set region;
+  chopper_polygon sampled_rectangle;
+  chopper_polygon_sampler region_sampler;
+  double minimum_inverse_velocity_edge;
+  double inverse_velocity_range;
+  double minimum_time_edge;
+  double time_range;
+  double pulse_period;
+  double draws_total;
+  double draws_inside;
+%}
+INITIALIZE INHERIT ESS_butterfly EXTEND %{
+  // Use the same minimum inverse velocity as in ESS_butterfly, which draws its wavelength
+  // uniformly and so its inverse velocity uniformly too: 1/v = lambda V2K / 2 pi exactly.
+  minimum_inverse_velocity_edge = Lmin * V2K / 2 / PI;
+  inverse_velocity_range = (Lmax - Lmin) * V2K / 2 / PI;
+
+  /* The emission times the source can produce, which is what the sampled rectangle has to
+   * span.
+   *
+   * Without time focusing ESS_butterfly draws t uniformly on [0, tmax_multiplier *
+   * ESS_SOURCE_DURATION). With it, t is drawn in a window tfocus_width wide centred on
+   * `tfocus_time - tfocus_dist / vz` -- a centre that slides with the neutron's own inverse
+   * velocity, so the band that window sweeps out is tfocus_dist * inverse_velocity_range
+   * longer than the window itself. Sizing the rectangle by tfocus_width alone puts it
+   * around the slowest neutron's window and nowhere near the rest, and every ray then falls
+   * outside the region as though the discs had stopped it.
+   *
+   * vz rather than v, strictly, but the region is drawn against the along-the-path inverse
+   * velocity throughout and the two differ by the direction cosine, which is 1 to a part in
+   * 1e4 for any sensible focusing rectangle.
+   *
+   * Either way the source absorbs whatever falls outside the pulse, so the reachable
+   * interval is that band clipped to it.
+   */
+  double emission_end = tmax_multiplier * ESS_SOURCE_DURATION;
+  if (tfocus_width > 0) {
+    double earliest = tfocus_time - tfocus_dist * (minimum_inverse_velocity_edge + inverse_velocity_range) - tfocus_width / 2.0;
+    double latest = tfocus_time - tfocus_dist * minimum_inverse_velocity_edge + tfocus_width / 2.0;
+    if (earliest < 0.0) earliest = 0.0;
+    if (latest > emission_end) latest = emission_end;
+    minimum_time_edge = earliest;
+    time_range = latest - earliest;
+    if (time_range <= 0.0) {
+      MPI_MASTER(
+        fprintf(stderr, "%s: the time focusing window reaches [%g, %g] s, which does not "
+                        "overlap the [0, %g] s pulse the source emits in, so nothing is "
+                        "emitted at all\n",
+                NAME_CURRENT_COMP,
+                tfocus_time - tfocus_dist * (minimum_inverse_velocity_edge + inverse_velocity_range) - tfocus_width / 2.0,
+                tfocus_time - tfocus_dist * minimum_inverse_velocity_edge + tfocus_width / 2.0,
+                emission_end);
+      );
+      exit(1);
+    }
+  } else {
+    minimum_time_edge = 0.0;
+    time_range = emission_end;
+  }
+
+  /* ESS_butterfly picks a pulse per ray and adds its offset to t, so what arrives in TRACE
+   * is not the emission time the region is drawn against. The offset comes back off there --
+   * unambiguously, so long as the window the source emits in is shorter than the gap
+   * between pulses, which it is for any ordinary tmax_multiplier. */
+  pulse_period = 1.0 / ESS_SOURCE_FREQUENCY;
+  if (n_pulses > 1 && (minimum_time_edge < 0.0 || minimum_time_edge + time_range > pulse_period)) {
+    MPI_MASTER(
+      fprintf(stderr, "%s: with n_pulses=%d the emission window [%g, %g] s has to fit inside "
+                      "one %g s pulse period, or the offset ESS_butterfly adds to t cannot be "
+                      "told from the emission time it is added to\n",
+              NAME_CURRENT_COMP, n_pulses, minimum_time_edge,
+              minimum_time_edge + time_range, pulse_period);
+    );
+    exit(1);
+  }
+
+  draws_total = 0.0;
+  draws_inside = 0.0;
+
+  chopper_parameters * chop_pars = (chopper_parameters *) choppers;
+
+  /* A caller still filling the pre-4.0.0 layout positionally compiles clean and lands a
+   * flight path in `edge_count` and rubbish in `edges`, so check before dereferencing it:
+   * a disc described by fewer than two edges is not a disc. */
+  for (int ci = 0; ci < chopper_count; ++ci) {
+    if (chop_pars[ci].edge_count < 2 || chop_pars[ci].edge_count % 2
+        || chop_pars[ci].edges == NULL) {
+      MPI_MASTER(
+        fprintf(stderr, "%s: chopper %d has %u edges at %p; each opening needs two, and "
+                        "chopper-lib 4.0.0 takes {speed, delay, beam, edge_count, edges, "
+                        "path}\n",
+                NAME_CURRENT_COMP, ci, chop_pars[ci].edge_count, (void *) chop_pars[ci].edges);
+      );
+      exit(1);
+    }
+  }
+
+  if (path_spread_fraction < 0.0) {
+    MPI_MASTER(
+      fprintf(stderr, "%s: path_spread_fraction is a length over a length, so it has no "
+                      "sign; given %g\n", NAME_CURRENT_COMP, path_spread_fraction);
+    );
+    exit(1);
+  }
+
+  /* The region the source draws from, and then what the train leaves of it. */
+  sampled_rectangle = chopper_polygon_rectangle(minimum_inverse_velocity_edge,
+                                                inverse_velocity_range,
+                                                minimum_time_edge, time_range);
+  region = chopper_polygon_set_empty();
+  if (!chopper_polygon_set_add(&region, &sampled_rectangle)) {
+    fprintf(stderr, "Out of memory in %s!\n", NAME_CURRENT_COMP);
+#ifdef USE_MPI
+    MPI_Abort(MPI_COMM_WORLD, -1);
+#endif
+    exit(1);
+  }
+
+  double * path_spreads = NULL;
+  if (path_spread_fraction > 0.0) {
+    path_spreads = (double *) calloc((size_t) chopper_count, sizeof(double));
+    if (path_spreads == NULL) {
+      /* Out of memory is this node's own news, so it says so itself rather than leaving it
+       * to master, and aborts the job rather than calling exit -- which under MPI means
+       * MPI_Finalize, and finalizing alone while the others are still working hangs them. */
+      fprintf(stderr, "Out of memory in %s!\n", NAME_CURRENT_COMP);
+#ifdef USE_MPI
+      MPI_Abort(MPI_COMM_WORLD, -1);
+#endif
+      exit(1);
+    }
+    for (int ci = 0; ci < chopper_count; ++ci) {
+      path_spreads[ci] = path_spread_fraction * chop_pars[ci].path;
+    }
+  }
+
+  const int transmitted = chopper_polygon_set_transmit_train(&region, (unsigned) chopper_count,
+                                                             chop_pars, path_spreads);
+  if (path_spreads) free(path_spreads);
+  if (!transmitted) {
+    MPI_MASTER(
+      fprintf(stderr, "%s: the transmitted region could not be computed; chopper-lib has "
+                      "said why above\n", NAME_CURRENT_COMP);
+    );
+    exit(1);
+  }
+  if (region.count == 0 || chopper_polygon_set_area(&region) <= 0.0) {
+    MPI_MASTER(
+      fprintf(stderr, "Choppers allow no transmission from %s!\n", NAME_CURRENT_COMP);
+    );
+    exit(1);
+  }
+
+  /* region.polygon is read from TRACE, which runs on the GPU; attach its pointer field so
+   * the device-resident twin of this component points at it, the same fix `off_init` uses
+   * for its own malloc'd mesh arrays elsewhere in this file. */
+  #ifdef OPENACC
+  acc_attach((void *)&region.polygon);
+  #endif
+
+  /* Drawing from the region instead of absorbing outside it is only the same measurement
+   * while the two coordinates are sampled uniformly and independently of everything else.
+   * Refuse the configurations where they are not, rather than apply a correction that does
+   * not correct. */
+  chopper_polygon_sampler_empty(&region_sampler);
+  if (resample) {
+    if (!use_region) {
+      MPI_MASTER(
+        fprintf(stderr, "%s: resample=1 needs use_region=1; there is nothing to resample "
+                        "away from with the region switched off\n", NAME_CURRENT_COMP);
+      );
+      exit(1);
+    }
+    if (noise_fraction != 0.0) {
+      MPI_MASTER(
+        fprintf(stderr, "%s: resample=1 and noise_fraction=%g are contradictory. Resampling "
+                        "emits no excluded ray at all, so there is no leak to set a rate "
+                        "for\n", NAME_CURRENT_COMP, noise_fraction);
+      );
+      exit(1);
+    }
+    if (tfocus_width > 0) {
+      MPI_MASTER(
+        fprintf(stderr, "%s: resample=1 cannot be used with time focusing. The emission time "
+                        "is drawn in a window centred on tfocus_time - tfocus_dist/vz, which "
+                        "moves with the neutron's own velocity, so no single weight factor "
+                        "puts the restriction back.\n"
+                        "  Time focusing already does this exactly: the window is a band of "
+                        "slope -tfocus_dist in the (1/v, t) plane, the shape of a chopper "
+                        "band, and w_tfocus is the compensating weight. Set tfocus_dist, "
+                        "tfocus_time and tfocus_width from the pulse-shaping disc and leave "
+                        "resample=0.\n", NAME_CURRENT_COMP);
+      );
+      exit(1);
+    }
+    region_sampler = chopper_polygon_sampler_make(&region,
+                                                  chopper_polygon_area(&sampled_rectangle));
+    if (region_sampler.count == 0) {
+      MPI_MASTER(
+        fprintf(stderr, "%s: the transmitted region has no area to resample into\n",
+                NAME_CURRENT_COMP);
+      );
+      exit(1);
+    }
+    // Same reason as region.polygon above: chopper_polygon_sampler_draw is `#pragma acc
+    // routine seq` and runs on the GPU, so the sampler's four calloc'd arrays need their
+    // pointer fields attached too.
+    #ifdef OPENACC
+    acc_attach((void *)&region_sampler.cumulative);
+    acc_attach((void *)&region_sampler.origin);
+    acc_attach((void *)&region_sampler.edge_a);
+    acc_attach((void *)&region_sampler.edge_b);
+    #endif
+    MPI_MASTER(
+      printf("%s: resampling into %u polygon(s), %u triangle(s); acceptance %.6g, so the "
+             "ray weight carries that factor and the run keeps its whole ncount\n",
+             NAME_CURRENT_COMP, region.count, region_sampler.count,
+             region_sampler.acceptance);
+    );
+  }
+
+  if (!strcmp(filename,"\0")) sprintf(filename,"%s",NAME_CURRENT_COMP);
+%}
+TRACE INHERIT ESS_butterfly EXTEND %{
+  // Since this is after the trace of ESS_butterfly, a neutron ray has already been selected.
+
+  // ESS_butterfly has already chosen which pulse this ray belongs to and added that pulse's
+  // offset to t. The region is drawn against the emission time inside a single pulse, so
+  // take the offset back off before testing anything, and put it back on anything redrawn.
+  // INITIALIZE has checked the emission window is shorter than the gap between pulses,
+  // which is what makes the split unambiguous.
+  double pulse_offset = n_pulses > 1 ? pulse_period * floor(t / pulse_period) : 0.0;
+  double t_emission = t - pulse_offset;
+
+  double inv_v = 1.0 / sqrt(vx*vx + vy*vy + vz*vz);
+
+  // Where the grid version looked up a bin, this asks the region directly -- so there is no
+  // bounds check to fail and nothing outside the rectangle to absorb as a special case: a
+  // ray outside it is simply outside the region, which the discs would have stopped.
+  int inside = chopper_polygon_set_contains(&region, inv_v, t_emission);
+
+  // Counted before anything is redrawn, and unweighted on purpose: the acceptance counts
+  // draws rather than intensity, so this is what SAVE checks the geometry against.
+  //
+  // Atomic because every ray in flight shares these two. Written the way McCode's own
+  // monitors write theirs -- see PSD_monitor.comp -- as a read and a store rather than a
+  // compound assignment.
+  if (verify_acceptance) {
+    #pragma acc atomic
+    draws_total = draws_total + 1.0;
+    if (inside) {
+      #pragma acc atomic
+      draws_inside = draws_inside + 1.0;
+    }
+  }
+
+  if (use_region) {
+    if (resample) {
+      if (!inside) {
+        // Draw a fresh (inverse velocity, emission time) from inside the region and rebuild
+        // everything downstream of the wavelength. The emission point, the surface it came
+        // from and the direction it was focused into are all still good -- they are sampled
+        // independently of these two coordinates -- so ESS_butterfly's own TRACE locals are
+        // reused rather than redrawn, and only the wavelength-dependent tail of its weight
+        // is repeated here.
+        chopper_polygon_sampler_draw(&region_sampler, rand01(), rand01(), rand01(),
+                                     &inv_v, &t_emission);
+        lambda = inv_v * 2 * PI / V2K;  // the source's own 1/v = lambda V2K / 2 pi, inverted
+        k = 2 * PI / lambda;
+        v = K2V * k;
+        vz = v * dz / r;
+        vy = v * dy / r;
+        vx = v * dx / r;
+
+        // ESS_butterfly.comp:588-607, with dt = 0 and w_tfocus = 1 because time focusing is
+        // refused above. The brilliance is a function of the emission time, which is why the
+        // parent evaluates it before adding the pulse offset and why this does too. The
+        // Schoenfeldt functions assign the weight rather than scaling it, so p needs no
+        // initialisation.
+        if (iscold) {
+          ESS_2015_Schoenfeldt_cold(&t_emission, &p, lambda, tfocus_width, tfocus_time, dt, yheight,
+                                    Mwidth_t, yheight, Mwidth_c, tmax_multiplier,
+                                    beamportangle, modX, modY);
+          p *= c_performance;
+          p *= ColdScalars[beamline - 1];
+        } else {
+          ESS_2015_Schoenfeldt_thermal(&t_emission, &p, lambda, tfocus_width, tfocus_time, dt, yheight,
+                                       Mwidth_t, yheight, Mwidth_c, tmax_multiplier,
+                                       beamportangle, modX, modY);
+          p *= t_performance;
+          p *= ThermalScalars[beamline - 1];
+        }
+        p *= w_stat * w_focus * w_geom * w_mult * w_tfocus;
+        p *= cos_factor;
+        if (iscold) {
+          p /= cold_frac;
+        } else {
+          p /= (1 - cold_frac);
+        }
+        // The pulse this ray was assigned to is untouched by the redraw: it is chosen
+        // independently of the wavelength and the emission time, so conditioning those two
+        // on the region leaves it exactly as ESS_butterfly drew it.
+        t = t_emission + pulse_offset;
+      }
+      // Every emitted ray pays the acceptance, whether it needed redrawing or not: the ones
+      // that landed inside the region on their own are a draw from the same restricted
+      // distribution, and carry the same correction.
+      p *= region_sampler.acceptance;
+    } else if (!inside && rand01() > noise_fraction) {
+      // Outside the region, and the noise leak did not save it
+      ABSORB;
+    }
+  }
+  // Otherwise, let it continue on its way -- the SCATTER call was made in ESS_butterfly
+%}
+SAVE %{
+  /* SAVE runs on every MPI node -- mccode_main calls finally() on all of them and finally()
+   * calls save() unconditionally -- so the reduction below is reached everywhere, which it
+   * has to be: mc_MPI_Sum is a collective MPI_Allreduce and a master-only call deadlocks.
+   * Only the file writing is master's alone. It has to be: mcuse_dir hands every node the
+   * same output directory, so without the gate every node writes the same path. */
+  double counters[2];
+  counters[0] = draws_total;
+  counters[1] = draws_inside;
+
+#ifdef USE_MPI
+  if (mpi_node_count > 1 && verify_acceptance) {
+    /* Reduced out of a scratch copy rather than in place. mc_MPI_Sum copies its answer back
+     * over the buffer it was handed, and SAVE is not called once per run: SIGUSR2 saves and
+     * *resumes*, and finally() then saves again. Reducing the counters in place would leave
+     * the second save reducing already-reduced data, once per node all over again.
+     *
+     * Summed and not averaged: these count draws, so the sum over nodes is the whole run's
+     * count. The acceptance is not reduced at all and must not be -- it comes from the
+     * region's geometry, so every node computed the same number. */
+    mc_MPI_Sum(counters, 2);
+  }
+#endif
+
+  /* Two independent facts, and a run is not obliged to produce either. The acceptance is the
+   * factor the resampling multiplies every ray weight by, and exists only when there is a
+   * sampler to have computed it. The measured figure is that same quantity counted from the
+   * run rather than from the geometry, so the two agreeing is a check rather than a
+   * restatement; the draw count rides along because it is the cheapest way to see that the
+   * reduction happened at all. */
+  MPI_MASTER(
+    char report[320];
+    char clause[160];
+    report[0] = '\0';
+    if (resample) {
+      snprintf(clause, sizeof(clause), "region acceptance %.6g; ", region_sampler.acceptance);
+      strncat(report, clause, sizeof(report) - strlen(report) - 1);
+    }
+    if (verify_acceptance && counters[0] > 0.0) {
+      snprintf(clause, sizeof(clause), "sampled %.6g over %g draws; ",
+               counters[1] / counters[0], counters[0]);
+      strncat(report, clause, sizeof(report) - strlen(report) - 1);
+    }
+    snprintf(clause, sizeof(clause), "%u polygon(s), area %.6g s^2/m; ",
+             region.count, chopper_polygon_set_area(&region));
+    strncat(report, clause, sizeof(report) - strlen(report) - 1);
+    const size_t report_length = strlen(report);
+    if (report_length > 2) {
+      report[report_length - 2] = '\0';  /* the trailing separator of the last clause */
+      printf("%s: %s\n", NAME_CURRENT_COMP, report);
+    }
+
+    // dirname is a McCode defined static global variable, and MC_PATHSEP_S is a McCode
+    // defined macro for the path separator as a string literal
+    if (save_polygons) {
+      chopper_write_polygons_to_file(dirname, filename, ".json", MC_PATHSEP_S,
+                                     &region, &sampled_rectangle);
+    }
+  );
+%}
+FINALLY %{
+  chopper_polygon_sampler_free(&region_sampler);
+  chopper_polygon_set_free(&region);
+%}
+END

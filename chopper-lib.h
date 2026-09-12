@@ -721,6 +721,28 @@ int chopper_polygon_set_transmit_train(chopper_polygon_set * set, unsigned count
  */
 range_set chopper_polygon_set_inverse_velocity_ranges(const chopper_polygon_set * set);
 
+/** Whether a point lies inside a convex polygon, its boundary counting as inside.
+ *
+ * The test every edge in turn: a point inside a convex polygon is on the same side of all
+ * of them. `#pragma acc routine seq`, so a McStas TRACE can call it per ray.
+ *
+ * @param polygon The polygon; fewer than three vertices contains nothing
+ * @param inverse_velocity s/m
+ * @param time s, at the source
+ * @return 1 if the point is inside or on the boundary, 0 otherwise
+ */
+int chopper_polygon_contains(const chopper_polygon * polygon,
+                             double inverse_velocity, double time);
+
+/** Whether a point lies in any polygon of a set.
+ *
+ * Linear in the total vertex count, which for a real train is a handful: a rectangle
+ * through the six BIFROST disks leaves one polygon of five vertices. Also
+ * `#pragma acc routine seq`.
+ */
+int chopper_polygon_set_contains(const chopper_polygon_set * set,
+                                 double inverse_velocity, double time);
+
 /** A direct sampler over a transmitted region.
  *
  * The same job as `chopper_mask_sampler` and the same shape -- three uniform deviates, one
@@ -798,6 +820,37 @@ int chopper_write_mask_to_file(
   const char * directory, const char * filename, const char * extension, const char * path_sep,
   const int * mask, unsigned inverse_velocity_count, unsigned time_count,
   const double * inverse_velocities, const double * times
+);
+
+/** Write a transmitted region as JSON.
+ *
+ * The grid writers above put a picture on a fixed mesh; this writes the region itself, so
+ * nothing is quantised and the file is a few hundred bytes rather than a few megabytes.
+ * Every number is written with enough digits to read back bit-exact.
+ *
+ *     {
+ *       "chopper_lib_version": "4.2.0",
+ *       "inverse_velocity_unit": "s/m",
+ *       "time_unit": "s",
+ *       "sampled": {"inverse_velocity": [lo, hi], "time": [lo, hi], "area": A},
+ *       "transmitted_area": a,
+ *       "acceptance": a / A,
+ *       "inverse_velocity_bands": [[lo, hi], ...],
+ *       "polygons": [{"area": ..., "vertices": [[iv, t], ...]}, ...]
+ *     }
+ *
+ * @param directory Where to write, or NULL
+ * @param filename The base name
+ * @param extension Appended unless `filename` already ends with it
+ * @param path_sep The platform's separator, as a string
+ * @param set The transmitted region
+ * @param sampled The region the caller drew from, which sets `acceptance`; may be NULL,
+ *                and then `sampled` and `acceptance` are written as null
+ * @return 1 on success, 0 if the file could not be opened
+ */
+int chopper_write_polygons_to_file(
+  const char * directory, const char * filename, const char * extension, const char * path_sep,
+  const chopper_polygon_set * set, const chopper_polygon * sampled
 );
 
 int chopper_write_total_to_file(

@@ -6,6 +6,7 @@
  */
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
 #include "chopper-lib.h"
 #include "test_util.h"
 
@@ -486,6 +487,107 @@ int main(void) {
 
     chopper_polygon_set_free(&lower_half);
     chopper_polygon_sampler_free(&sampler);
+    chopper_polygon_set_free(&set);
+  }
+
+  TEST("containment: inside, outside, and exactly on the boundary");
+  {
+    const chopper_polygon square = chopper_polygon_rectangle(0.0, 2.0, 0.0, 2.0);
+    CHECK_EQUAL_INT(chopper_polygon_contains(&square, 1.0, 1.0), 1);
+    CHECK_EQUAL_INT(chopper_polygon_contains(&square, 3.0, 1.0), 0);
+    CHECK_EQUAL_INT(chopper_polygon_contains(&square, 1.0, -0.5), 0);
+    CHECK_EQUAL_INT(chopper_polygon_contains(&square, 0.0, 1.0), 1);   /* on an edge */
+    CHECK_EQUAL_INT(chopper_polygon_contains(&square, 2.0, 2.0), 1);   /* on a corner */
+
+    /* Winding must not matter: the same square listed the other way round. */
+    chopper_polygon reversed = square;
+    for (unsigned i = 0; i < square.count; ++i)
+      reversed.vertex[i] = square.vertex[square.count - 1 - i];
+    CHECK_EQUAL_INT(chopper_polygon_contains(&reversed, 1.0, 1.0), 1);
+    CHECK_EQUAL_INT(chopper_polygon_contains(&reversed, 3.0, 1.0), 0);
+
+    const chopper_polygon empty = chopper_polygon_rectangle(0.0, -1.0, 0.0, 1.0);
+    CHECK_EQUAL_INT(chopper_polygon_contains(&empty, 0.0, 0.0), 0);
+    CHECK_EQUAL_INT(chopper_polygon_contains(NULL, 0.0, 0.0), 0);
+  }
+
+  TEST("a set contains what its polygons do, and the region agrees with the disks");
+  {
+    chopper_polygon_set set = bifrost_source();
+    chopper_polygon_set_transmit_train(&set, 6, bifrost, NULL);
+    CHECK_EQUAL_INT(chopper_polygon_set_contains(NULL, 0.0, 0.0), 0);
+
+    /* Centroids are inside, and the point test agrees a neutron there gets through. */
+    for (unsigned i = 0; i < set.count; ++i) {
+      double a = 0.0, t = 0.0;
+      for (unsigned v = 0; v < set.polygon[i].count; ++v) {
+        a += set.polygon[i].vertex[v].inverse_velocity;
+        t += set.polygon[i].vertex[v].time;
+      }
+      a /= (double) set.polygon[i].count;
+      t /= (double) set.polygon[i].count;
+      CHECK_EQUAL_INT(chopper_polygon_set_contains(&set, a, t), 1);
+    }
+
+    /* Over the whole sampled rectangle, containment and the independent point test must
+     * agree everywhere except within rounding of the boundary. */
+    unsigned disagreements = 0, inside = 0;
+    for (unsigned i = 1; i <= 20000; ++i) {
+      const double a = SOURCE_INVERSE_VELOCITY_MIN
+                     + SOURCE_INVERSE_VELOCITY_RANGE * radical_inverse(i, 2);
+      const double t = SOURCE_TIME_MIN + SOURCE_TIME_RANGE * radical_inverse(i, 3);
+      const int by_polygon = chopper_polygon_set_contains(&set, a, t);
+      const int by_disks = neutron_passes(bifrost, 6, a, t, 0.0);
+      if (by_polygon) ++inside;
+      if (by_polygon != by_disks) ++disagreements;
+    }
+    CHECK(inside > 0);
+    CHECK_EQUAL_INT(disagreements, 0);
+    chopper_polygon_set_free(&set);
+  }
+
+  TEST("the region writes itself as JSON");
+  {
+    chopper_polygon_set set = bifrost_source();
+    const chopper_polygon sampled = chopper_polygon_rectangle(
+        SOURCE_INVERSE_VELOCITY_MIN, SOURCE_INVERSE_VELOCITY_RANGE,
+        SOURCE_TIME_MIN, SOURCE_TIME_RANGE);
+    chopper_polygon_set_transmit_train(&set, 6, bifrost, NULL);
+
+    CHECK_EQUAL_INT(chopper_write_polygons_to_file(".", "test_polygon_output", ".json",
+                                                   "/", &set, &sampled), 1);
+    FILE * written = fopen("./test_polygon_output.json", "r");
+    CHECK(written != NULL);
+    if (written) {
+      /* Braces and brackets balanced, and the expected keys present: enough to catch a
+       * malformed write without linking a JSON parser into the test. The Python side
+       * parses it properly. */
+      int braces = 0, brackets = 0, quotes = 0, saw_acceptance = 0, saw_vertices = 0;
+      char buffer[4096];
+      while (fgets(buffer, sizeof(buffer), written)) {
+        for (const char * c = buffer; *c; ++c) {
+          if (*c == '"') quotes ^= 1;
+          if (quotes) continue;
+          if (*c == '{') ++braces;
+          if (*c == '}') --braces;
+          if (*c == '[') ++brackets;
+          if (*c == ']') --brackets;
+        }
+        if (strstr(buffer, "\"acceptance\"")) saw_acceptance = 1;
+        if (strstr(buffer, "\"vertices\"")) saw_vertices = 1;
+      }
+      fclose(written);
+      CHECK_EQUAL_INT(braces, 0);
+      CHECK_EQUAL_INT(brackets, 0);
+      CHECK_EQUAL_INT(saw_acceptance, 1);
+      CHECK_EQUAL_INT(saw_vertices, 1);
+      remove("./test_polygon_output.json");
+    }
+
+    /* No sampled region to measure against: written as null, not as a division by zero. */
+    CHECK_EQUAL_INT(chopper_write_polygons_to_file(".", "test_polygon_null", ".json",
+                                                   "/", &set, NULL), 1);
+    remove("./test_polygon_null.json");
     chopper_polygon_set_free(&set);
   }
 

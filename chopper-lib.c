@@ -980,6 +980,36 @@ range_set chopper_polygon_set_inverse_velocity_ranges(const chopper_polygon_set 
   return merged;
 }
 
+#pragma acc routine seq
+int chopper_polygon_contains(const chopper_polygon * polygon, const double inverse_velocity,
+                             const double time) {
+  if (polygon == NULL || polygon->count < 3) return 0;
+  /* Convex, so an inside point is on the same side of every edge. Collecting both signs
+   * rather than comparing against the first lets a collinear edge -- cross exactly zero,
+   * which a point on the boundary gives -- count as neither. */
+  int positive = 0, negative = 0;
+  for (unsigned i = 0; i < polygon->count; ++i) {
+    const chopper_point p = polygon->vertex[i];
+    const chopper_point q = polygon->vertex[(i + 1) % polygon->count];
+    const double cross = (q.inverse_velocity - p.inverse_velocity) * (time - p.time)
+                       - (q.time - p.time) * (inverse_velocity - p.inverse_velocity);
+    if (cross > 0.0) positive = 1;
+    if (cross < 0.0) negative = 1;
+    if (positive && negative) return 0;
+  }
+  return 1;
+}
+
+#pragma acc routine seq
+int chopper_polygon_set_contains(const chopper_polygon_set * set,
+                                 const double inverse_velocity, const double time) {
+  if (set == NULL) return 0;
+  for (unsigned i = 0; i < set->count; ++i) {
+    if (chopper_polygon_contains(&set->polygon[i], inverse_velocity, time)) return 1;
+  }
+  return 0;
+}
+
 void chopper_polygon_sampler_empty(chopper_polygon_sampler * sampler) {
   if (sampler == NULL) return;
   sampler->count = 0;
@@ -1161,6 +1191,62 @@ int chopper_write_mask_to_file(
   }
   fclose(file);
   return 0;
+}
+
+int chopper_write_polygons_to_file(
+  const char * directory, const char * filename, const char * extension, const char * path_sep,
+  const chopper_polygon_set * set, const chopper_polygon * sampled
+) {
+  FILE * file = chopper_open_file_for_writing(directory, filename, extension, path_sep);
+  if (file == NULL) return 0;
+
+  const double transmitted = chopper_polygon_set_area(set);
+  const double sampled_area = sampled ? chopper_polygon_area(sampled) : 0.0;
+
+  /* %.17g round-trips a double exactly, which is the point of writing the region rather
+   * than a picture of it: a reader gets the vertices the calculation actually used. */
+  fprintf(file, "{\n");
+  fprintf(file, "  \"chopper_lib_version\": \"%d.%d.%d\",\n", CHOPPER_LIB_VERSION_MAJOR,
+          CHOPPER_LIB_VERSION_MINOR, CHOPPER_LIB_VERSION_PATCH);
+  fprintf(file, "  \"inverse_velocity_unit\": \"s/m\",\n");
+  fprintf(file, "  \"time_unit\": \"s\",\n");
+  if (sampled && sampled->count >= 3 && sampled_area > 0.0) {
+    double iv_low = 0, iv_high = 0, t_low = 0, t_high = 0;
+    chopper_polygon_extent(sampled, 1.0, 0.0, &iv_low, &iv_high);
+    chopper_polygon_extent(sampled, 0.0, 1.0, &t_low, &t_high);
+    fprintf(file, "  \"sampled\": {\"inverse_velocity\": [%.17g, %.17g], "
+                  "\"time\": [%.17g, %.17g], \"area\": %.17g},\n",
+            iv_low, iv_high, t_low, t_high, sampled_area);
+    fprintf(file, "  \"acceptance\": %.17g,\n", transmitted / sampled_area);
+  } else {
+    fprintf(file, "  \"sampled\": null,\n");
+    fprintf(file, "  \"acceptance\": null,\n");
+  }
+  fprintf(file, "  \"transmitted_area\": %.17g,\n", transmitted);
+
+  range_set bands = chopper_polygon_set_inverse_velocity_ranges(set);
+  fprintf(file, "  \"inverse_velocity_bands\": [");
+  for (unsigned i = 0; i < bands.count; ++i) {
+    fprintf(file, "%s[%.17g, %.17g]", i ? ", " : "",
+            bands.ranges[i].minimum, bands.ranges[i].maximum);
+  }
+  fprintf(file, "],\n");
+  if (bands.ranges) free(bands.ranges);
+
+  fprintf(file, "  \"polygons\": [\n");
+  for (unsigned i = 0; set != NULL && i < set->count; ++i) {
+    const chopper_polygon * polygon = &set->polygon[i];
+    fprintf(file, "    {\"area\": %.17g, \"vertices\": [", chopper_polygon_area(polygon));
+    for (unsigned v = 0; v < polygon->count; ++v) {
+      fprintf(file, "%s[%.17g, %.17g]", v ? ", " : "",
+              polygon->vertex[v].inverse_velocity, polygon->vertex[v].time);
+    }
+    fprintf(file, "]}%s\n", (i + 1 < set->count) ? "," : "");
+  }
+  fprintf(file, "  ]\n}\n");
+
+  fclose(file);
+  return 1;
 }
 
 int chopper_write_total_to_file(
