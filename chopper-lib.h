@@ -26,6 +26,20 @@
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.2.1
+ *     `range_set_sort` merges correctly. It lost the extent of a range containing the one
+ *     after it, and its answer depended on the order `qsort` left tied lower edges in --
+ *     which is not fixed across platforms, so a train's admitted band could differ
+ *     between Windows and Linux. Present since 2.0.0 and reached whenever the ranges
+ *     overlap enough to tie, which a disk `aperture` makes likely.
+ *
+ *     `range_sort` is gone. It took its `range` by value, so it swapped the edges of a
+ *     copy and returned -- it never did anything, whatever its name and its documentation
+ *     said. Nothing called it: `range_set_sort` puts its own ranges the right way round.
+ *     A removal rather than a fix because the signature is the fault, and a removal in a
+ *     patch release because the rule above is about what a structure means, and a
+ *     function that did nothing cannot have meant anything.
+ *
  * 4.2.0
  *     `chopper_polygon` and the functions around it carry the transmitted region of
  *     (inverse velocity, time) as a set of convex polygons, which is what a chopper train
@@ -84,7 +98,7 @@
  */
 #define CHOPPER_LIB_VERSION_MAJOR 4
 #define CHOPPER_LIB_VERSION_MINOR 2
-#define CHOPPER_LIB_VERSION_PATCH 0
+#define CHOPPER_LIB_VERSION_PATCH 1
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
 #define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
                            + CHOPPER_LIB_VERSION_MINOR * 100 \
@@ -105,12 +119,6 @@ struct int_range_struct {
   int maximum;
 };
 typedef struct int_range_struct int_range;
-
-/** Sort the limits of a single `range` in place
- *
- * A range is characterized by its minimal and maximal edges. This function ensures they are ordered properly.
- * */
-void range_sort(range a);
 
 /** Determine whether two ranges overlap, and if so, characterize their overlapping type
  *
