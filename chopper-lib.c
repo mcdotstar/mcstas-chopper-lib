@@ -15,13 +15,6 @@ extern "C" {
 #endif
 
 /******************************** range functions ************************************/
-void range_sort(range a){
-  if (a.maximum < a.minimum){
-    const double tmp = a.minimum;
-    a.minimum = a.maximum;
-    a.maximum = tmp;
-  }
-}
 int classify_range_overlap(const range * a, const range * b){
   //  |A    A|   |B   B| ... or ... |B   B|   |A   A|
   if (a->maximum < b->minimum || b->maximum < a->minimum) return 0;
@@ -40,8 +33,24 @@ int compare_ranges(const range * a, const range * b){
   return 0;
 }
 // This gateway function is used along with qsort, which handles only void pointers
+/** Order for the sort below: by lower edge, then widest first.
+ *
+ * `compare_ranges` looks only at the lower edge, as its documentation says, so it leaves
+ * ranges that share one in whatever order `qsort` puts them. `qsort` is not stable and
+ * each platform's implementation orders equal elements as it pleases, so a set with tied
+ * lower edges -- which the clamping in `chopper_inverse_velocity_windows` produces in
+ * quantity -- came out ordered differently on different platforms. The merge below is
+ * order-independent now, but the array this leaves sorted is part of what a caller sees,
+ * so break the tie here rather than leave it to the C library.
+ */
 static int compare_sorted_ranges(const void * ptr_a, const void * ptr_b){
-  return compare_ranges((range *) ptr_a, (range *) ptr_b);
+  const range * a = (const range *) ptr_a;
+  const range * b = (const range *) ptr_b;
+  if (a->minimum < b->minimum) return -1;
+  if (a->minimum > b->minimum) return 1;
+  if (a->maximum > b->maximum) return -1;
+  if (a->maximum < b->maximum) return 1;
+  return 0;
 }
 /******************************** range_set functions ************************************/
 range_set range_set_sort(range_set s){
@@ -50,37 +59,48 @@ range_set range_set_sort(range_set s){
   // what a chopper admitting no window intersects with, and what a train that passes
   // nothing carries from there on.
   if (s.count == 0 || s.ranges == NULL) return s;
-  // sort all sub-ranges:
-  for (unsigned i=0; i<s.count; ++i) range_sort(s.ranges[i]);
-  // sort the sub-ranges by minimum
-  qsort(s.ranges, s.count, sizeof(*(s.ranges)), compare_sorted_ranges);
-  // combine overlapping ranges:
-  unsigned overlapping = 0;
-  for (unsigned i=1; i<s.count; ++i) if (s.ranges[i-1].maximum >= s.ranges[i].minimum) ++overlapping;
-  if (overlapping){
-    range_set new_s;
-    new_s.count = s.count - overlapping;
-    new_s.ranges = calloc(new_s.count, sizeof(range));
-    // copy the first element
-    new_s.ranges[0].minimum = s.ranges[0].minimum;
-    new_s.ranges[0].maximum = s.ranges[0].maximum;
 
-    unsigned copied = 1;
-    for (unsigned i=1; i<s.count; ++i) if (s.ranges[i-1].maximum >= s.ranges[i].minimum) {
-        // combine the lower bound of the end of the new ranges and the i_th range upper bound over the last new range:
-        new_s.ranges[copied-1].maximum = s.ranges[i].maximum;
-      } else {
-        new_s.ranges[copied].minimum = s.ranges[i].minimum;
-        new_s.ranges[copied++].maximum = s.ranges[i].maximum;
-      }
-    if (copied != s.count - overlapping) printf("Expected to copy %u but copied %u ranges!\n", s.count - overlapping, copied);
-    // // free the now-old range_set before we lose its handle ... this is dangerous
-    // if (s.ranges) free(s.ranges);
-    // recursively re-sort in case we missed overlapping ranges
-    return range_set_sort(new_s);
-  } else {
-    return s;
+  /* Put every range the right way round, so the merge below can assume it. */
+  for (unsigned i = 0; i < s.count; ++i) {
+    if (s.ranges[i].maximum < s.ranges[i].minimum) {
+      const double swap = s.ranges[i].minimum;
+      s.ranges[i].minimum = s.ranges[i].maximum;
+      s.ranges[i].maximum = swap;
+    }
   }
+  qsort(s.ranges, s.count, sizeof(*(s.ranges)), compare_sorted_ranges);
+
+  /* Merge in one pass, carrying the upper edge of the range being built.
+   *
+   * This used to compare each range against its *neighbour in the input* and assign that
+   * neighbour's upper edge to the range being built. Both halves were wrong. Assigning
+   * loses the extent of a range that contains the one after it -- [1, 10] followed by
+   * [2, 3] came out [1, 3] -- and comparing against the neighbour rather than the running
+   * edge made the answer depend on the order equal lower edges happened to be sorted
+   * into: {[0, 10], [0, 1], [5, 6]} came out [0, 1] [5, 6] one way round and [0, 6] the
+   * other, where the union is [0, 10] either way. That is how a chopper train's admitted
+   * band came out differently on Windows and on Linux.
+   *
+   * A running maximum fixes both, and needs no second pass: whichever way ties are
+   * ordered, the wider range absorbs the narrower. Touching ranges merge as well as
+   * overlapping ones, which is what the documentation promises.
+   *
+   * Merged in place, which the contract allows -- it says the input may be returned -- and
+   * which every caller already handles by comparing the returned pointer against the one
+   * it passed in.
+   */
+  unsigned kept = 1;
+  for (unsigned i = 1; i < s.count; ++i) {
+    if (s.ranges[i].minimum <= s.ranges[kept - 1].maximum) {
+      if (s.ranges[i].maximum > s.ranges[kept - 1].maximum) {
+        s.ranges[kept - 1].maximum = s.ranges[i].maximum;
+      }
+    } else {
+      s.ranges[kept++] = s.ranges[i];
+    }
+  }
+  s.count = kept;
+  return s;
 }
 
 static int range_intersects_ranges(const range r, const range_set rs){
