@@ -1,6 +1,7 @@
 # C tests, run by CTest. The Python tests alongside them build and run whole McStas
 # instruments and are driven by pytest instead; these cover the library on its own.
-set(chopper_lib_tests test_ranges test_chopper_timing test_multi_chopper test_mask_sampler)
+set(chopper_lib_tests test_ranges test_chopper_timing test_multi_chopper test_mask_sampler
+                     test_polygon)
 
 foreach (name IN LISTS chopper_lib_tests)
   add_executable(${name} ${name}.c)

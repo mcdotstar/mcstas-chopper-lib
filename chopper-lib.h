@@ -26,6 +26,14 @@
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.2.0
+ *     `chopper_polygon` and the functions around it carry the transmitted region of
+ *     (inverse velocity, time) as a set of convex polygons, which is what a chopper train
+ *     actually passes rather than an approximation of it. `chopper_inverse_velocity_windows`
+ *     and `chopper_inverse_velocity_time_mask` are unchanged and still here; see the note
+ *     on `chopper_polygon_set_transmit_train` for what each of them gets wrong and why.
+ *     Additive: nothing already described means anything different.
+ *
  * 4.1.0
  *     `chopper_mask_sampler` draws an (inverse velocity, time) pair from the allowed
  *     cells of a finished mask, and carries the `acceptance` a caller has to multiply
@@ -75,7 +83,7 @@
  *     Unversioned releases, taking `phase`.
  */
 #define CHOPPER_LIB_VERSION_MAJOR 4
-#define CHOPPER_LIB_VERSION_MINOR 1
+#define CHOPPER_LIB_VERSION_MINOR 2
 #define CHOPPER_LIB_VERSION_PATCH 0
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
 #define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
@@ -468,10 +476,381 @@ void chopper_mask_sampler_draw(
   double * inverse_velocity, double * time
   );
 
+/*************************** transmitted phase space *********************************/
+
+/** \section polygons The transmitted region, exactly
+ *
+ * `chopper_inverse_velocity_windows` and `chopper_inverse_velocity_time_mask` each answer
+ * a question about the transmitted region without ever building it, and each is wrong in
+ * its own direction. The window function works out every disk's admissible inverse
+ * velocities letting the emission time range over the whole pulse *independently per
+ * disk*, then intersects those ranges; an intersection of projections is a superset of the
+ * projection of the intersection, so it reports bands that no single emission time
+ * delivers. The mask samples the region onto a grid, so it both misses channels thinner
+ * than a bin and counts partly covered bins whole.
+ *
+ * The region itself is not hard to build. A neutron emitted at inverse velocity `a` and
+ * time `t` reaches path `L` at `t + L*a`, so a disk open on `[lower, upper]` accepts
+ *
+ *     lower <= t + L*a <= upper
+ *
+ * -- a slab between two parallel lines. A train's acceptance is an intersection of unions
+ * of such slabs, one union per disk, and intersection distributes over union, so the exact
+ * acceptance *is* a union of convex pieces: one per choice of which opening and which turn
+ * of each disk a neutron goes through. Nothing here approximates anything.
+ *
+ * Two consequences make it much less code than it sounds. Every piece is an intersection
+ * of half-planes, so every piece is convex and the only geometry needed is clipping a
+ * convex polygon by one half-plane -- there is no polygon-polygon intersection anywhere in
+ * this file. And a clip adds at most one vertex, so a polygon's vertex count is bounded in
+ * advance, which is why `chopper_polygon` can be a fixed-size value with no allocation of
+ * its own.
+ *
+ * The pieces are disjoint whenever a disk is shut for part of every turn, so
+ * `chopper_polygon_set_area` is a plain sum and a sampler may pick a piece by area without
+ * double counting. `chopper_polygon_set_transmit` checks the one case that would break
+ * that; see its note on `path_spread`.
+ */
+
+/** The most vertices one polygon can reach.
+ *
+ * A clip against one half-plane adds at most one vertex and a disk costs two clips, so a
+ * `V`-vertex source polygon through `n` disks needs `V + 2n`. 32 covers a rectangle
+ * through fourteen disks, and a six-disk train from a rectangle has been measured to stay
+ * at six. Exceeding it is an error rather than a truncation: dropping a vertex would
+ * quietly *enlarge* the region, which is the class of mistake this whole section exists to
+ * end.
+ */
+#define CHOPPER_POLYGON_MAX_VERTICES 32
+
+/** How thin a polygon may be before it is treated as nothing.
+ *
+ * Relative to the polygon's own bounding box, so it is free of any choice of units --
+ * which matters more than it looks. The same region is 1.3e-07 in s^2/m and 1.3e+02 in
+ * ms^2/km, so an absolute tolerance means different things in different unit bases, and a
+ * library that took one would give different answers to callers working in different
+ * units. This one does not.
+ *
+ * Clipping along an edge a polygon already has leaves a piece of no area, and those are
+ * what this is for. A genuinely narrow transmission channel is nowhere near it: a sliver
+ * one part in a million of its own length still has an area a millionth of its bounding
+ * box, six orders above this.
+ */
+#define CHOPPER_POLYGON_AREA_TOLERANCE 1e-12
+
+/** A point of the (inverse velocity, time) plane: s/m and s, at the source. */
+struct chopper_point_struct {
+  double inverse_velocity;
+  double time;
+};
+typedef struct chopper_point_struct chopper_point;
+
+/** A convex region of (inverse velocity, emission time), its vertices in order.
+ *
+ * Fixed capacity, so this is a value: copy it, put it on the stack, let it go out of
+ * scope. It owns nothing and needs no freeing. Only `chopper_polygon_set` allocates.
+ */
+struct chopper_polygon_struct {
+  unsigned count;
+  chopper_point vertex[CHOPPER_POLYGON_MAX_VERTICES];
+};
+typedef struct chopper_polygon_struct chopper_polygon;
+
+/** A union of convex regions -- what a source emits, or what a train transmits.
+ *
+ * Disjoint as `chopper_polygon_set_transmit` leaves it, because two turns of one disk
+ * cannot both pass the same neutron. That is what lets `chopper_polygon_set_area` add
+ * rather than needing inclusion-exclusion.
+ */
+struct chopper_polygon_set_struct {
+  unsigned count;
+  unsigned capacity;
+  chopper_polygon * polygon;
+};
+typedef struct chopper_polygon_set_struct chopper_polygon_set;
+
+/** The rectangle a source emits into.
+ *
+ * @param inverse_velocity_minimum Low edge, s/m
+ * @param inverse_velocity_range Its width; must be positive
+ * @param time_minimum Low edge of the emission window, s
+ * @param time_range Its width; must be positive
+ * @return The rectangle, counter-clockwise; a polygon of no vertices if either range is
+ *         not positive
+ */
+chopper_polygon chopper_polygon_rectangle(double inverse_velocity_minimum,
+                                          double inverse_velocity_range,
+                                          double time_minimum, double time_range);
+
+/** Area by the shoelace formula, in s^2/m. Zero for fewer than three vertices. */
+double chopper_polygon_area(const chopper_polygon * polygon);
+
+/** The range of `alpha*inverse_velocity + beta*time` over a polygon.
+ *
+ * With `alpha` a path and `beta` 1 this is the earliest and latest a neutron in the
+ * polygon reaches that path, which is how the turns of a disk that could matter are found.
+ *
+ * @param polygon The polygon to measure; may be empty, in which case nothing is written
+ * @param alpha Weight on inverse velocity
+ * @param beta Weight on time
+ * @param lower [out] The smallest value, if not NULL
+ * @param upper [out] The largest, if not NULL
+ */
+void chopper_polygon_extent(const chopper_polygon * polygon, double alpha, double beta,
+                            double * lower, double * upper);
+
+/** Keep the part of a polygon where `alpha*inverse_velocity + beta*time <= c`.
+ *
+ * The only geometry in this file; everything above and below is built from it. A disk at
+ * path `L` is `alpha = L, beta = 1`; an emission window is `alpha = 0`; a bound on inverse
+ * velocity alone is `beta = 0`.
+ *
+ * @param polygon The polygon, clipped in place. Left with no vertices if nothing survives.
+ * @param alpha Weight on inverse velocity
+ * @param beta Weight on time
+ * @param c The bound
+ * @return 0 if the result would need more than `CHOPPER_POLYGON_MAX_VERTICES` vertices,
+ *         leaving `polygon` untouched; 1 otherwise
+ */
+int chopper_polygon_clip_halfplane(chopper_polygon * polygon,
+                                   double alpha, double beta, double c);
+
+/** Keep what a disk passes when the path to it is known only to lie in a range.
+ *
+ * A neutron in a guide travels further than the straight line between two points, and how
+ * much further depends on where it bounced. That deviation is in *path*, so what it does
+ * to an arrival time is `deviation * inverse_velocity` -- larger for a slow neutron, and
+ * nothing at all to the inverse velocity itself. So it does not grow the polygon evenly in
+ * every direction; it tilts one of the two bounding lines.
+ *
+ * A neutron emitted at `(a, t)` arrives somewhere in `[t + shortest*a, t + longest*a]`, and
+ * passes if any of that lands in the window:
+ *
+ *     t + shortest_path*a <= upper     and     t + longest_path*a >= lower
+ *
+ * Two half-planes again, of different slopes, so the slab opens into a wedge as the
+ * inverse velocity grows. Equal paths give the ordinary slab.
+ *
+ * @param polygon The polygon, clipped in place
+ * @param shortest_path The shortest path a neutron could have taken to this disk, m
+ * @param longest_path The longest; must not be less than `shortest_path`
+ * @param beta Weight on time, normally 1
+ * @param lower The window opens
+ * @param upper The window closes
+ * @return 0 on vertex overflow, 1 otherwise
+ */
+int chopper_polygon_clip_wedge(chopper_polygon * polygon, double shortest_path,
+                               double longest_path, double beta,
+                               double lower, double upper);
+
+/** An empty set, owning nothing. Safe to free, and what a failed call leaves behind. */
+chopper_polygon_set chopper_polygon_set_empty(void);
+
+/** Append a copy of `polygon`, growing the set if it must.
+ *
+ * Polygons of fewer than three vertices, and those thinner than
+ * `CHOPPER_POLYGON_AREA_TOLERANCE` of their own bounding box, are dropped rather than
+ * stored: they carry no phase space and would otherwise accumulate.
+ *
+ * @return 0 if the set could not grow, 1 otherwise -- including when the polygon was
+ *         deliberately dropped, which is not a failure
+ */
+int chopper_polygon_set_add(chopper_polygon_set * set, const chopper_polygon * polygon);
+
+/** Release what a set allocated and leave an empty set behind. A NULL pointer is fine. */
+void chopper_polygon_set_free(chopper_polygon_set * set);
+
+/** Total area, s^2/m -- a plain sum, because the pieces are disjoint. */
+double chopper_polygon_set_area(const chopper_polygon_set * set);
+
+/** Replace a set with the part of it that passes one disk.
+ *
+ * Each polygon contributes one output per turn of each opening it can reach, so the set
+ * grows before it shrinks; for a real train most of those turns miss and the survivors
+ * collapse quickly. A disk parked open is skipped, having no period to constrain anything,
+ * and one parked shut empties the set and says so on stdout, as everywhere else here. A
+ * disk open for at least a whole turn is skipped for the same reason as one parked open.
+ *
+ * `path_spread` is how much further than `chopper.path` a neutron may have travelled to
+ * reach this disk -- a guide's path-length spread, in metres. Zero is the straight line
+ * every other function in this file assumes. It widens the answer, and is a *support*
+ * rather than a distribution: a neutron is passed if some path in `[path, path +
+ * path_spread]` would have got it through, with no weighting over which. That is the same
+ * bargain `chopper_parameters::aperture` makes for the width of the beam.
+ *
+ * A spread wide enough to make consecutive turns of one disk overlap would break the
+ * disjointness the area and the sampler rely on, and be silently wrong rather than loudly
+ * so. This refuses instead: the condition is
+ *
+ *     path_spread * largest inverse velocity in the set < period - opening
+ *
+ * and a real guide is orders of magnitude inside it.
+ *
+ * @param set The set, replaced in place; left empty and owning nothing on failure
+ * @param chopper The disk
+ * @param path_spread Extra path available, m; 0 for a straight line
+ * @return 0 if memory ran out, a polygon overflowed, or the spread would overlap turns;
+ *         1 otherwise
+ */
+int chopper_polygon_set_transmit(chopper_polygon_set * set, chopper_parameters chopper,
+                                 double path_spread);
+
+/** The whole train, in beam order, stopping early once nothing is left.
+ *
+ * The result is the exact transmitted region: `chopper_polygon_set_area` over the area of
+ * what was handed in is the fraction of a uniformly drawn ray budget the train passes, and
+ * `chopper_polygon_set_inverse_velocity_ranges` is the band list.
+ *
+ * @param set The source region, replaced by what it transmits
+ * @param count How many disks
+ * @param choppers The disks
+ * @param path_spreads One per disk, or NULL for the straight line to every one
+ * @return 0 on failure, as `chopper_polygon_set_transmit`
+ */
+int chopper_polygon_set_transmit_train(chopper_polygon_set * set, unsigned count,
+                                       const chopper_parameters * choppers,
+                                       const double * path_spreads);
+
+/** The inverse velocity bands a set covers, sorted and merged.
+ *
+ * What `chopper_inverse_velocity_windows` is trying to compute. That one projects each
+ * disk separately and intersects the projections; this projects the intersection, which is
+ * the question that was being asked.
+ *
+ * @warning The returned `ranges` is allocated here and must be freed at calling scope.
+ */
+range_set chopper_polygon_set_inverse_velocity_ranges(const chopper_polygon_set * set);
+
+/** Whether a point lies inside a convex polygon, its boundary counting as inside.
+ *
+ * The test every edge in turn: a point inside a convex polygon is on the same side of all
+ * of them. `#pragma acc routine seq`, so a McStas TRACE can call it per ray.
+ *
+ * @param polygon The polygon; fewer than three vertices contains nothing
+ * @param inverse_velocity s/m
+ * @param time s, at the source
+ * @return 1 if the point is inside or on the boundary, 0 otherwise
+ */
+int chopper_polygon_contains(const chopper_polygon * polygon,
+                             double inverse_velocity, double time);
+
+/** Whether a point lies in any polygon of a set.
+ *
+ * Linear in the total vertex count, which for a real train is a handful: a rectangle
+ * through the six BIFROST disks leaves one polygon of five vertices. Also
+ * `#pragma acc routine seq`.
+ */
+int chopper_polygon_set_contains(const chopper_polygon_set * set,
+                                 double inverse_velocity, double time);
+
+/** A direct sampler over a transmitted region.
+ *
+ * The same job as `chopper_mask_sampler` and the same shape -- three uniform deviates, one
+ * binary search, never rejects -- over the exact region rather than a grid approximation
+ * of it. Each polygon is fanned into triangles from its first vertex and a point is placed
+ * in one of them, so `count` here is triangles, not polygons.
+ *
+ * `acceptance` is exact: the transmitted area over the area sampled, both known in closed
+ * form rather than counted in cells. The grid sampler can only over-estimate it, because a
+ * partly covered cell is weighted whole -- on a BIFROST train over a wide source that is
+ * 6.7% high on a twelve-million-cell grid, and it improves only as the cell count.
+ *
+ * Everything the note on `chopper_mask_sampler::acceptance` says about independence still
+ * applies: the correction is right only while both coordinates are drawn uniformly and
+ * independently of each other and of whatever else the caller samples.
+ *
+ * @param count Triangles to draw from; 0 means nothing to draw
+ * @param acceptance Transmitted area over sampled area, and the factor a ray weight must
+ *                   be multiplied by
+ * @param cumulative `count` entries increasing to 1, the area-weighted triangle distribution
+ * @param origin First vertex of each triangle
+ * @param edge_a Second vertex less the first
+ * @param edge_b Third vertex less the first
+ */
+struct chopper_polygon_sampler_struct {
+  unsigned count;
+  double acceptance;
+  double * cumulative;
+  chopper_point * origin;
+  chopper_point * edge_a;
+  chopper_point * edge_b;
+};
+typedef struct chopper_polygon_sampler_struct chopper_polygon_sampler;
+
+/** Build a sampler over a transmitted region.
+ *
+ * @param set What the train transmits
+ * @param sampled_area The area of the region the caller draws from, s^2/m -- normally
+ *                     `chopper_polygon_area` of the source rectangle handed to the train.
+ *                     It sets `acceptance` and nothing else.
+ * @return A sampler whose arrays are allocated here and must be released with
+ *         `chopper_polygon_sampler_free`. An empty set, or a non-positive `sampled_area`,
+ *         comes back with `count` 0 and no allocations; drawing from it is a caller error.
+ */
+chopper_polygon_sampler chopper_polygon_sampler_make(const chopper_polygon_set * set,
+                                                     double sampled_area);
+
+/** Zero a sampler so it can be freed or tested before it has been built. */
+void chopper_polygon_sampler_empty(chopper_polygon_sampler * sampler);
+
+/** Release what `chopper_polygon_sampler_make` allocated. A NULL pointer is fine. */
+void chopper_polygon_sampler_free(chopper_polygon_sampler * sampler);
+
+/** Draw one (inverse velocity, time) pair uniformly from the transmitted region.
+ *
+ * As with `chopper_mask_sampler_draw`, the deviates are arguments rather than drawn here,
+ * so the library needs no generator and a caller inside a McStas TRACE can hand over
+ * `rand01()`.
+ *
+ * @param sampler A sampler with a non-zero `count`
+ * @param triangle_deviate A uniform deviate on [0, 1), choosing which triangle
+ * @param first_deviate A uniform deviate on [0, 1), placing the point along one edge
+ * @param second_deviate A uniform deviate on [0, 1), along the other
+ * @param inverse_velocity [out] The drawn inverse velocity, s/m
+ * @param time [out] The drawn emission time, s
+ *
+ * @note The caller still owes the ray weight a factor of `sampler->acceptance`.
+ */
+void chopper_polygon_sampler_draw(const chopper_polygon_sampler * sampler,
+                                  double triangle_deviate, double first_deviate,
+                                  double second_deviate,
+                                  double * inverse_velocity, double * time);
+
 int chopper_write_mask_to_file(
   const char * directory, const char * filename, const char * extension, const char * path_sep,
   const int * mask, unsigned inverse_velocity_count, unsigned time_count,
   const double * inverse_velocities, const double * times
+);
+
+/** Write a transmitted region as JSON.
+ *
+ * The grid writers above put a picture on a fixed mesh; this writes the region itself, so
+ * nothing is quantised and the file is a few hundred bytes rather than a few megabytes.
+ * Every number is written with enough digits to read back bit-exact.
+ *
+ *     {
+ *       "chopper_lib_version": "4.2.0",
+ *       "inverse_velocity_unit": "s/m",
+ *       "time_unit": "s",
+ *       "sampled": {"inverse_velocity": [lo, hi], "time": [lo, hi], "area": A},
+ *       "transmitted_area": a,
+ *       "acceptance": a / A,
+ *       "inverse_velocity_bands": [[lo, hi], ...],
+ *       "polygons": [{"area": ..., "vertices": [[iv, t], ...]}, ...]
+ *     }
+ *
+ * @param directory Where to write, or NULL
+ * @param filename The base name
+ * @param extension Appended unless `filename` already ends with it
+ * @param path_sep The platform's separator, as a string
+ * @param set The transmitted region
+ * @param sampled The region the caller drew from, which sets `acceptance`; may be NULL,
+ *                and then `sampled` and `acceptance` are written as null
+ * @return 1 on success, 0 if the file could not be opened
+ */
+int chopper_write_polygons_to_file(
+  const char * directory, const char * filename, const char * extension, const char * path_sep,
+  const chopper_polygon_set * set, const chopper_polygon * sampled
 );
 
 int chopper_write_total_to_file(

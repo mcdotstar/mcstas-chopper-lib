@@ -706,6 +706,422 @@ void chopper_mask_sampler_draw(
   }
 }
 
+/*************************** transmitted phase space *********************************/
+
+chopper_polygon chopper_polygon_rectangle(const double inverse_velocity_minimum,
+                                          const double inverse_velocity_range,
+                                          const double time_minimum, const double time_range) {
+  chopper_polygon polygon;
+  polygon.count = 0;
+  if (inverse_velocity_range <= 0.0 || time_range <= 0.0) return polygon;
+  const double a0 = inverse_velocity_minimum, a1 = inverse_velocity_minimum + inverse_velocity_range;
+  const double t0 = time_minimum, t1 = time_minimum + time_range;
+  polygon.vertex[0].inverse_velocity = a0; polygon.vertex[0].time = t0;
+  polygon.vertex[1].inverse_velocity = a1; polygon.vertex[1].time = t0;
+  polygon.vertex[2].inverse_velocity = a1; polygon.vertex[2].time = t1;
+  polygon.vertex[3].inverse_velocity = a0; polygon.vertex[3].time = t1;
+  polygon.count = 4;
+  return polygon;
+}
+
+double chopper_polygon_area(const chopper_polygon * polygon) {
+  if (polygon == NULL || polygon->count < 3) return 0.0;
+  double twice = 0.0;
+  for (unsigned i = 0; i < polygon->count; ++i) {
+    const chopper_point p = polygon->vertex[i];
+    const chopper_point q = polygon->vertex[(i + 1) % polygon->count];
+    twice += p.inverse_velocity * q.time - q.inverse_velocity * p.time;
+  }
+  return fabs(twice) / 2.0;
+}
+
+void chopper_polygon_extent(const chopper_polygon * polygon, const double alpha,
+                            const double beta, double * lower, double * upper) {
+  if (polygon == NULL || polygon->count == 0) return;
+  double lo = alpha * polygon->vertex[0].inverse_velocity + beta * polygon->vertex[0].time;
+  double hi = lo;
+  for (unsigned i = 1; i < polygon->count; ++i) {
+    const double v = alpha * polygon->vertex[i].inverse_velocity + beta * polygon->vertex[i].time;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (lower != NULL) *lower = lo;
+  if (upper != NULL) *upper = hi;
+}
+
+int chopper_polygon_clip_halfplane(chopper_polygon * polygon, const double alpha,
+                                   const double beta, const double c) {
+  if (polygon == NULL) return 1;
+  if (polygon->count < 3) { polygon->count = 0; return 1; }
+  chopper_polygon out;
+  out.count = 0;
+  for (unsigned i = 0; i < polygon->count; ++i) {
+    const chopper_point p = polygon->vertex[i];
+    const chopper_point q = polygon->vertex[(i + 1) % polygon->count];
+    const double dp = alpha * p.inverse_velocity + beta * p.time - c;
+    const double dq = alpha * q.inverse_velocity + beta * q.time - c;
+    if (dp <= 0.0) {
+      if (out.count >= CHOPPER_POLYGON_MAX_VERTICES) return 0;
+      out.vertex[out.count++] = p;
+    }
+    /* The crossing point is a vertex of the result only when the two ends are strictly on
+     * opposite sides. A vertex lying *in* the line is already emitted by the test above --
+     * counting it as a crossing too would add it twice, and duplicates eat the vertex
+     * budget that CHOPPER_POLYGON_MAX_VERTICES is sized against. */
+    if ((dp < 0.0 && dq > 0.0) || (dp > 0.0 && dq < 0.0)) {
+      if (out.count >= CHOPPER_POLYGON_MAX_VERTICES) return 0;
+      const double f = dp / (dp - dq);
+      out.vertex[out.count].inverse_velocity =
+          p.inverse_velocity + f * (q.inverse_velocity - p.inverse_velocity);
+      out.vertex[out.count].time = p.time + f * (q.time - p.time);
+      ++out.count;
+    }
+  }
+  if (out.count < 3) out.count = 0;
+  *polygon = out;
+  return 1;
+}
+
+int chopper_polygon_clip_wedge(chopper_polygon * polygon, const double shortest_path,
+                               const double longest_path, const double beta,
+                               const double lower, const double upper) {
+  /* The earliest a neutron can arrive must not be after the window shuts, and the latest
+   * must not be before it opens. */
+  if (!chopper_polygon_clip_halfplane(polygon, shortest_path, beta, upper)) return 0;
+  if (polygon->count == 0) return 1;
+  if (!chopper_polygon_clip_halfplane(polygon, -longest_path, -beta, -lower)) return 0;
+  return 1;
+}
+
+chopper_polygon_set chopper_polygon_set_empty(void) {
+  chopper_polygon_set set;
+  set.count = 0;
+  set.capacity = 0;
+  set.polygon = NULL;
+  return set;
+}
+
+/** Whether a polygon carries no phase space worth keeping.
+ *
+ * Against its own bounding box, so the test means the same thing whatever units the
+ * caller works in. See CHOPPER_POLYGON_AREA_TOLERANCE.
+ */
+static int chopper_polygon_is_negligible(const chopper_polygon * polygon) {
+  if (polygon == NULL || polygon->count < 3) return 1;
+  double a_lo = 0, a_hi = 0, t_lo = 0, t_hi = 0;
+  chopper_polygon_extent(polygon, 1.0, 0.0, &a_lo, &a_hi);
+  chopper_polygon_extent(polygon, 0.0, 1.0, &t_lo, &t_hi);
+  const double box = (a_hi - a_lo) * (t_hi - t_lo);
+  if (!(box > 0.0)) return 1;
+  return chopper_polygon_area(polygon) <= CHOPPER_POLYGON_AREA_TOLERANCE * box;
+}
+
+int chopper_polygon_set_add(chopper_polygon_set * set, const chopper_polygon * polygon) {
+  if (set == NULL) return 0;
+  if (chopper_polygon_is_negligible(polygon)) return 1;
+  if (set->count == set->capacity) {
+    const unsigned capacity = set->capacity ? 2 * set->capacity : 8;
+    chopper_polygon * grown = (chopper_polygon *) realloc(set->polygon,
+                                                          capacity * sizeof(chopper_polygon));
+    if (grown == NULL) {
+      printf("Out of memory holding %u transmitted polygons\n", capacity);
+      return 0;
+    }
+    set->polygon = grown;
+    set->capacity = capacity;
+  }
+  set->polygon[set->count++] = *polygon;
+  return 1;
+}
+
+void chopper_polygon_set_free(chopper_polygon_set * set) {
+  if (set == NULL) return;
+  if (set->polygon) free(set->polygon);
+  *set = chopper_polygon_set_empty();
+}
+
+double chopper_polygon_set_area(const chopper_polygon_set * set) {
+  if (set == NULL) return 0.0;
+  double total = 0.0;
+  for (unsigned i = 0; i < set->count; ++i) total += chopper_polygon_area(&set->polygon[i]);
+  return total;
+}
+
+/** The two edge times of one opening, ordered, widened by the beam's own width. */
+static void chopper_opening_times(const chopper_parameters chopper, const unsigned opening,
+                                  double * lower, double * upper) {
+  double lo = chopper_edge_time(chopper, chopper.edges[2 * opening]);
+  double hi = chopper_edge_time(chopper, chopper.edges[2 * opening + 1]);
+  if (hi < lo) { const double swap = lo; lo = hi; hi = swap; }
+  const double aperture = chopper_aperture_time(chopper);
+  *lower = lo - aperture;
+  *upper = hi + aperture;
+}
+
+int chopper_polygon_set_transmit(chopper_polygon_set * set, const chopper_parameters chopper,
+                                 const double path_spread) {
+  if (set == NULL) return 0;
+  if (chopper.edge_count < 2 || chopper.edges == NULL) {
+    /* No openings at all is a beam stop, the same as one parked shut. */
+    chopper_polygon_set_free(set);
+    return 1;
+  }
+  if (chopper.speed == 0.0) {
+    if (chopper_parked_is_open(chopper)) return 1;
+    printf("chopper-lib: nothing gets through a chopper parked with the beam at %g "
+           "degrees, where the disk is solid; the train transmits nothing.\n", chopper.beam);
+    chopper_polygon_set_free(set);
+    return 1;
+  }
+  if (path_spread < 0.0) {
+    printf("A path spread is a length, so it has no sign; given %g m\n", path_spread);
+    chopper_polygon_set_free(set);
+    return 0;
+  }
+
+  const double tau = 1.0 / fabs(chopper.speed);
+  const unsigned opening_count = chopper.edge_count / 2;
+  const double shortest_path = chopper.path;
+  const double longest_path = chopper.path + path_spread;
+
+  /* A spread wide enough to reach from one turn into the next stops the pieces being
+   * disjoint, and then areas double-count. Test it against the slowest neutron present. */
+  if (path_spread > 0.0 && set->count) {
+    double inverse_velocity_maximum = 0.0;
+    for (unsigned i = 0; i < set->count; ++i) {
+      double high = 0.0;
+      chopper_polygon_extent(&set->polygon[i], 1.0, 0.0, NULL, &high);
+      if (high > inverse_velocity_maximum) inverse_velocity_maximum = high;
+    }
+    for (unsigned w = 0; w < opening_count; ++w) {
+      double lo = 0, hi = 0;
+      chopper_opening_times(chopper, w, &lo, &hi);
+      if (hi - lo >= tau) continue;  /* never shut, so nothing to overlap into */
+      if (path_spread * inverse_velocity_maximum >= tau - (hi - lo)) {
+        printf("A path spread of %g m reaches from one turn of this chopper into the next "
+               "for an inverse velocity of %g s/m; the transmitted pieces would overlap "
+               "and their areas would count twice. Narrow the inverse velocity range or "
+               "the spread.\n", path_spread, inverse_velocity_maximum);
+        chopper_polygon_set_free(set);
+        return 0;
+      }
+    }
+  }
+
+  chopper_polygon_set out = chopper_polygon_set_empty();
+  for (unsigned i = 0; i < set->count; ++i) {
+    /* The earliest and latest this polygon can reach the disk: the near path bounds the
+     * first and the far path the second. */
+    double u_min = 0.0, u_max = 0.0, ignored = 0.0;
+    chopper_polygon_extent(&set->polygon[i], shortest_path, 1.0, &u_min, &ignored);
+    chopper_polygon_extent(&set->polygon[i], longest_path, 1.0, &ignored, &u_max);
+
+    for (unsigned w = 0; w < opening_count; ++w) {
+      double lo = 0, hi = 0;
+      chopper_opening_times(chopper, w, &lo, &hi);
+      /* Each failure below unwinds by hand rather than jumping to one exit. This file is
+       * copied verbatim into a McStas instrument beside every other library the
+       * instrument includes, and while a label cannot collide with another function's
+       * label -- labels have function scope -- it can be eaten by a macro. Anything that
+       * defines `failed` would rewrite both the label and the jumps to it, which is the
+       * same way `PI` bites a caller that defines its own. Three lines, three times. */
+      if (hi - lo >= tau) {
+        /* Open for at least a whole turn: it constrains nothing, like one parked open. */
+        if (!chopper_polygon_set_add(&out, &set->polygon[i])) {
+          chopper_polygon_set_free(&out);
+          chopper_polygon_set_free(set);
+          return 0;
+        }
+        continue;
+      }
+      const long first = (long) floor((u_min - hi) / tau);
+      const long last = (long) ceil((u_max - lo) / tau);
+      for (long n = first; n <= last; ++n) {
+        chopper_polygon piece = set->polygon[i];
+        if (!chopper_polygon_clip_wedge(&piece, shortest_path, longest_path, 1.0,
+                                        lo + (double) n * tau, hi + (double) n * tau)) {
+          printf("A transmitted polygon needs more than %d vertices; raise "
+                 "CHOPPER_POLYGON_MAX_VERTICES\n", CHOPPER_POLYGON_MAX_VERTICES);
+          chopper_polygon_set_free(&out);
+          chopper_polygon_set_free(set);
+          return 0;
+        }
+        if (!chopper_polygon_set_add(&out, &piece)) {
+          chopper_polygon_set_free(&out);
+          chopper_polygon_set_free(set);
+          return 0;
+        }
+      }
+    }
+  }
+  chopper_polygon_set_free(set);
+  *set = out;
+  return 1;
+}
+
+int chopper_polygon_set_transmit_train(chopper_polygon_set * set, const unsigned count,
+                                       const chopper_parameters * choppers,
+                                       const double * path_spreads) {
+  if (set == NULL || (count && choppers == NULL)) return 0;
+  for (unsigned i = 0; i < count && set->count; ++i) {
+    if (!chopper_polygon_set_transmit(set, choppers[i],
+                                      path_spreads ? path_spreads[i] : 0.0)) return 0;
+  }
+  return 1;
+}
+
+range_set chopper_polygon_set_inverse_velocity_ranges(const chopper_polygon_set * set) {
+  range_set ranges;
+  ranges.count = 0;
+  ranges.ranges = NULL;
+  if (set == NULL || set->count == 0) return ranges;
+  ranges.ranges = (range *) calloc(set->count, sizeof(range));
+  if (ranges.ranges == NULL) {
+    printf("Out of memory projecting %u polygons\n", set->count);
+    return ranges;
+  }
+  for (unsigned i = 0; i < set->count; ++i) {
+    chopper_polygon_extent(&set->polygon[i], 1.0, 0.0,
+                           &ranges.ranges[i].minimum, &ranges.ranges[i].maximum);
+  }
+  ranges.count = set->count;
+  /* Sorts in place and merges what overlaps or touches; may return the input. */
+  const range_set merged = range_set_sort(ranges);
+  if (merged.ranges != ranges.ranges && ranges.ranges) free(ranges.ranges);
+  return merged;
+}
+
+#pragma acc routine seq
+int chopper_polygon_contains(const chopper_polygon * polygon, const double inverse_velocity,
+                             const double time) {
+  if (polygon == NULL || polygon->count < 3) return 0;
+  /* Convex, so an inside point is on the same side of every edge. Collecting both signs
+   * rather than comparing against the first lets a collinear edge -- cross exactly zero,
+   * which a point on the boundary gives -- count as neither. */
+  int positive = 0, negative = 0;
+  for (unsigned i = 0; i < polygon->count; ++i) {
+    const chopper_point p = polygon->vertex[i];
+    const chopper_point q = polygon->vertex[(i + 1) % polygon->count];
+    const double cross = (q.inverse_velocity - p.inverse_velocity) * (time - p.time)
+                       - (q.time - p.time) * (inverse_velocity - p.inverse_velocity);
+    if (cross > 0.0) positive = 1;
+    if (cross < 0.0) negative = 1;
+    if (positive && negative) return 0;
+  }
+  return 1;
+}
+
+#pragma acc routine seq
+int chopper_polygon_set_contains(const chopper_polygon_set * set,
+                                 const double inverse_velocity, const double time) {
+  if (set == NULL) return 0;
+  for (unsigned i = 0; i < set->count; ++i) {
+    if (chopper_polygon_contains(&set->polygon[i], inverse_velocity, time)) return 1;
+  }
+  return 0;
+}
+
+void chopper_polygon_sampler_empty(chopper_polygon_sampler * sampler) {
+  if (sampler == NULL) return;
+  sampler->count = 0;
+  sampler->acceptance = 0.0;
+  sampler->cumulative = NULL;
+  sampler->origin = NULL;
+  sampler->edge_a = NULL;
+  sampler->edge_b = NULL;
+}
+
+void chopper_polygon_sampler_free(chopper_polygon_sampler * sampler) {
+  if (sampler == NULL) return;
+  if (sampler->cumulative) free(sampler->cumulative);
+  if (sampler->origin) free(sampler->origin);
+  if (sampler->edge_a) free(sampler->edge_a);
+  if (sampler->edge_b) free(sampler->edge_b);
+  chopper_polygon_sampler_empty(sampler);
+}
+
+chopper_polygon_sampler chopper_polygon_sampler_make(const chopper_polygon_set * set,
+                                                     const double sampled_area) {
+  chopper_polygon_sampler sampler;
+  chopper_polygon_sampler_empty(&sampler);
+  if (set == NULL || set->count == 0 || !(sampled_area > 0.0)) return sampler;
+
+  unsigned triangles = 0;
+  for (unsigned i = 0; i < set->count; ++i) {
+    if (set->polygon[i].count >= 3) triangles += set->polygon[i].count - 2;
+  }
+  if (triangles == 0) return sampler;
+
+  sampler.cumulative = (double *) calloc(triangles, sizeof(double));
+  sampler.origin = (chopper_point *) calloc(triangles, sizeof(chopper_point));
+  sampler.edge_a = (chopper_point *) calloc(triangles, sizeof(chopper_point));
+  sampler.edge_b = (chopper_point *) calloc(triangles, sizeof(chopper_point));
+  if (sampler.cumulative == NULL || sampler.origin == NULL
+      || sampler.edge_a == NULL || sampler.edge_b == NULL) {
+    printf("Out of memory building a sampler over %u triangles\n", triangles);
+    chopper_polygon_sampler_free(&sampler);
+    return sampler;
+  }
+
+  /* Fan each polygon from its first vertex. Convex, so every fan triangle is inside it. */
+  double total = 0.0;
+  unsigned t = 0;
+  for (unsigned i = 0; i < set->count; ++i) {
+    const chopper_polygon * polygon = &set->polygon[i];
+    if (polygon->count < 3) continue;
+    const chopper_point origin = polygon->vertex[0];
+    for (unsigned v = 1; v + 1 < polygon->count; ++v) {
+      const chopper_point a = polygon->vertex[v], b = polygon->vertex[v + 1];
+      sampler.origin[t] = origin;
+      sampler.edge_a[t].inverse_velocity = a.inverse_velocity - origin.inverse_velocity;
+      sampler.edge_a[t].time = a.time - origin.time;
+      sampler.edge_b[t].inverse_velocity = b.inverse_velocity - origin.inverse_velocity;
+      sampler.edge_b[t].time = b.time - origin.time;
+      total += fabs(sampler.edge_a[t].inverse_velocity * sampler.edge_b[t].time
+                    - sampler.edge_b[t].inverse_velocity * sampler.edge_a[t].time) / 2.0;
+      sampler.cumulative[t] = total;
+      ++t;
+    }
+  }
+  if (!(total > 0.0)) {
+    chopper_polygon_sampler_free(&sampler);
+    return sampler;
+  }
+  sampler.count = t;
+  sampler.acceptance = total / sampled_area;
+  for (unsigned i = 0; i < sampler.count; ++i) sampler.cumulative[i] /= total;
+  /* Pin the last, rather than leave a draw above it to fall off the end of the search. */
+  sampler.cumulative[sampler.count - 1] = 1.0;
+  return sampler;
+}
+
+#pragma acc routine seq
+void chopper_polygon_sampler_draw(const chopper_polygon_sampler * sampler,
+                                  const double triangle_deviate, const double first_deviate,
+                                  const double second_deviate,
+                                  double * inverse_velocity, double * time) {
+  if (sampler == NULL || sampler->count == 0) return;
+  unsigned low = 0, high = sampler->count - 1;
+  while (low < high) {
+    const unsigned mid = low + (high - low) / 2;
+    if (sampler->cumulative[mid] <= triangle_deviate) low = mid + 1; else high = mid;
+  }
+  /* Two uniform deviates land in the unit square; folding the far half back across the
+   * diagonal puts them uniformly in the unit triangle, and the affine map carries that
+   * to the real one. */
+  double u = first_deviate, v = second_deviate;
+  if (u + v > 1.0) { u = 1.0 - u; v = 1.0 - v; }
+  if (inverse_velocity != NULL) {
+    *inverse_velocity = sampler->origin[low].inverse_velocity
+                      + u * sampler->edge_a[low].inverse_velocity
+                      + v * sampler->edge_b[low].inverse_velocity;
+  }
+  if (time != NULL) {
+    *time = sampler->origin[low].time + u * sampler->edge_a[low].time
+          + v * sampler->edge_b[low].time;
+  }
+}
+
 static void chopper_write_axes_to_file(FILE * file,
     const double * inverse_velocities, const unsigned inverse_velocity_count,
     const double * times, const unsigned time_count) {
@@ -786,6 +1202,62 @@ int chopper_write_mask_to_file(
   }
   fclose(file);
   return 0;
+}
+
+int chopper_write_polygons_to_file(
+  const char * directory, const char * filename, const char * extension, const char * path_sep,
+  const chopper_polygon_set * set, const chopper_polygon * sampled
+) {
+  FILE * file = chopper_open_file_for_writing(directory, filename, extension, path_sep);
+  if (file == NULL) return 0;
+
+  const double transmitted = chopper_polygon_set_area(set);
+  const double sampled_area = sampled ? chopper_polygon_area(sampled) : 0.0;
+
+  /* %.17g round-trips a double exactly, which is the point of writing the region rather
+   * than a picture of it: a reader gets the vertices the calculation actually used. */
+  fprintf(file, "{\n");
+  fprintf(file, "  \"chopper_lib_version\": \"%d.%d.%d\",\n", CHOPPER_LIB_VERSION_MAJOR,
+          CHOPPER_LIB_VERSION_MINOR, CHOPPER_LIB_VERSION_PATCH);
+  fprintf(file, "  \"inverse_velocity_unit\": \"s/m\",\n");
+  fprintf(file, "  \"time_unit\": \"s\",\n");
+  if (sampled && sampled->count >= 3 && sampled_area > 0.0) {
+    double iv_low = 0, iv_high = 0, t_low = 0, t_high = 0;
+    chopper_polygon_extent(sampled, 1.0, 0.0, &iv_low, &iv_high);
+    chopper_polygon_extent(sampled, 0.0, 1.0, &t_low, &t_high);
+    fprintf(file, "  \"sampled\": {\"inverse_velocity\": [%.17g, %.17g], "
+                  "\"time\": [%.17g, %.17g], \"area\": %.17g},\n",
+            iv_low, iv_high, t_low, t_high, sampled_area);
+    fprintf(file, "  \"acceptance\": %.17g,\n", transmitted / sampled_area);
+  } else {
+    fprintf(file, "  \"sampled\": null,\n");
+    fprintf(file, "  \"acceptance\": null,\n");
+  }
+  fprintf(file, "  \"transmitted_area\": %.17g,\n", transmitted);
+
+  range_set bands = chopper_polygon_set_inverse_velocity_ranges(set);
+  fprintf(file, "  \"inverse_velocity_bands\": [");
+  for (unsigned i = 0; i < bands.count; ++i) {
+    fprintf(file, "%s[%.17g, %.17g]", i ? ", " : "",
+            bands.ranges[i].minimum, bands.ranges[i].maximum);
+  }
+  fprintf(file, "],\n");
+  if (bands.ranges) free(bands.ranges);
+
+  fprintf(file, "  \"polygons\": [\n");
+  for (unsigned i = 0; set != NULL && i < set->count; ++i) {
+    const chopper_polygon * polygon = &set->polygon[i];
+    fprintf(file, "    {\"area\": %.17g, \"vertices\": [", chopper_polygon_area(polygon));
+    for (unsigned v = 0; v < polygon->count; ++v) {
+      fprintf(file, "%s[%.17g, %.17g]", v ? ", " : "",
+              polygon->vertex[v].inverse_velocity, polygon->vertex[v].time);
+    }
+    fprintf(file, "]}%s\n", (i + 1 < set->count) ? "," : "");
+  }
+  fprintf(file, "  ]\n}\n");
+
+  fclose(file);
+  return 1;
 }
 
 int chopper_write_total_to_file(
