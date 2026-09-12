@@ -919,9 +919,19 @@ int chopper_polygon_set_transmit(chopper_polygon_set * set, const chopper_parame
     for (unsigned w = 0; w < opening_count; ++w) {
       double lo = 0, hi = 0;
       chopper_opening_times(chopper, w, &lo, &hi);
+      /* Each failure below unwinds by hand rather than jumping to one exit. This file is
+       * copied verbatim into a McStas instrument beside every other library the
+       * instrument includes, and while a label cannot collide with another function's
+       * label -- labels have function scope -- it can be eaten by a macro. Anything that
+       * defines `failed` would rewrite both the label and the jumps to it, which is the
+       * same way `PI` bites a caller that defines its own. Three lines, three times. */
       if (hi - lo >= tau) {
         /* Open for at least a whole turn: it constrains nothing, like one parked open. */
-        if (!chopper_polygon_set_add(&out, &set->polygon[i])) goto failed;
+        if (!chopper_polygon_set_add(&out, &set->polygon[i])) {
+          chopper_polygon_set_free(&out);
+          chopper_polygon_set_free(set);
+          return 0;
+        }
         continue;
       }
       const long first = (long) floor((u_min - hi) / tau);
@@ -932,20 +942,21 @@ int chopper_polygon_set_transmit(chopper_polygon_set * set, const chopper_parame
                                         lo + (double) n * tau, hi + (double) n * tau)) {
           printf("A transmitted polygon needs more than %d vertices; raise "
                  "CHOPPER_POLYGON_MAX_VERTICES\n", CHOPPER_POLYGON_MAX_VERTICES);
-          goto failed;
+          chopper_polygon_set_free(&out);
+          chopper_polygon_set_free(set);
+          return 0;
         }
-        if (!chopper_polygon_set_add(&out, &piece)) goto failed;
+        if (!chopper_polygon_set_add(&out, &piece)) {
+          chopper_polygon_set_free(&out);
+          chopper_polygon_set_free(set);
+          return 0;
+        }
       }
     }
   }
   chopper_polygon_set_free(set);
   *set = out;
   return 1;
-
-failed:
-  chopper_polygon_set_free(&out);
-  chopper_polygon_set_free(set);
-  return 0;
 }
 
 int chopper_polygon_set_transmit_train(chopper_polygon_set * set, const unsigned count,
