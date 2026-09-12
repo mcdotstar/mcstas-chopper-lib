@@ -29,6 +29,81 @@ the particle structure, and a possibly-large group size;
 both of which are undesirable.
 
 
+## The transmitted region
+
+`chopper_inverse_velocity_windows` and `chopper_inverse_velocity_time_mask` each answer a
+question about the region a train transmits without building it, and each is wrong in its
+own direction. The window function works out every disk's admissible inverse velocities
+letting the emission time range over the whole pulse *independently per disk*, then
+intersects those ranges — an intersection of projections is a superset of the projection of
+the intersection, so it reports bands no single emission time delivers. The mask samples
+the region onto a grid, so it misses channels thinner than a bin and counts partly covered
+bins whole.
+
+Since 4.2.0 the region itself can be built, exactly, as a set of convex polygons in
+(inverse velocity, emission time):
+
+```c
+chopper_polygon_set set = chopper_polygon_set_empty();
+const chopper_polygon source = chopper_polygon_rectangle(
+    inverse_velocity_minimum, inverse_velocity_range, time_minimum, time_range);
+chopper_polygon_set_add(&set, &source);
+chopper_polygon_set_transmit_train(&set, chopper_count, choppers, NULL);
+
+const double transmitted = chopper_polygon_set_area(&set);   /* s^2/m */
+range_set bands = chopper_polygon_set_inverse_velocity_ranges(&set);
+```
+
+A neutron emitted at inverse velocity `a` and time `t` reaches path `L` at `t + L*a`, so a
+disk open on `[lower, upper]` accepts `lower <= t + L*a <= upper` — a slab between two
+parallel lines. A train's acceptance is an intersection of unions of such slabs, and
+intersection distributes over union, so the exact acceptance *is* a union of convex pieces,
+one per choice of which opening and which turn of each disk a neutron goes through.
+
+Two things follow, and they are what keep this small. Every piece is an intersection of
+half-planes, so every piece is convex and the only geometry involved is clipping a convex
+polygon by one half-plane — there is no polygon-polygon intersection anywhere. And one clip
+adds at most one vertex, so a polygon's vertex count is bounded in advance, which is why
+`chopper_polygon` is a fixed-size value that allocates nothing. A rectangle through the six
+BIFROST disks comes out as a single five-vertex polygon.
+
+Nothing is removed: the window and mask functions are unchanged and still the right tools
+when a grid is what you want, or when the over-estimate is harmless and you would rather
+not carry a polygon set around.
+
+### Sampling it
+
+`chopper_polygon_sampler` does the same job as `chopper_mask_sampler`, in the same shape —
+three uniform deviates, one binary search, never rejects — over the exact region rather
+than a grid approximation of it:
+
+```c
+chopper_polygon_sampler sampler = chopper_polygon_sampler_make(&set, source_area);
+chopper_polygon_sampler_draw(&sampler, rand01(), rand01(), rand01(),
+                             &inverse_velocity, &time);
+p *= sampler.acceptance;
+```
+
+`acceptance` is exact here: both areas are known in closed form rather than counted in
+cells. The grid sampler can only over-estimate it, because a partly covered cell is
+weighted whole — on a BIFROST train over a wide source that is 6.7% high on a
+twelve-million-cell grid, and it improves only as fast as the cell count.
+
+### A beam that does not travel in a straight line
+
+A neutron in a guide travels further than the straight line, and how much further depends
+on where it bounced. That deviation is in *path*, so what it does to an arrival time is
+`deviation * inverse_velocity` — larger for a slow neutron, and nothing at all to the
+inverse velocity. So it does not grow the region evenly in every direction; it tilts one of
+the two lines bounding each slab, opening it into a wedge.
+
+`chopper_polygon_set_transmit` and `..._transmit_train` take that as a `path_spread` in
+metres per disk. Like `aperture` it gives a *support* rather than a distribution: a neutron
+is passed if some path in `[path, path + path_spread]` would have got it through, with no
+weighting over which. A spread wide enough to reach from one turn of a disk into the next
+would stop the transmitted pieces being disjoint and make their areas count twice; that is
+refused rather than computed, and a real guide is orders of magnitude inside the limit.
+
 ## Building the C source
 
 `chopper-lib.c` needs `V2K`, `K2V` and `PI`, and defines none of them. McStas defines
