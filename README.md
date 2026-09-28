@@ -365,3 +365,9 @@ a mask should ask for 4.1.0.
 #error "This instrument draws from a chopper mask; chopper-lib 4.1.0 or newer is required"
 #endif
 ```
+
+## License
+
+BSD 3-Clause; see [LICENSE](LICENSE). Every file McCode redistributes carries an
+`SPDX-License-Identifier` line and the copyright notice, so the terms travel with the
+file when it is fetched on its own.

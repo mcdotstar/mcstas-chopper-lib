@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Gregory Tucker, ESS ERIC
 //
 // Created by Gregory Tucker, ESS ERIC on 2023-06-01.
 //
