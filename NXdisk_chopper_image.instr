@@ -93,7 +93,7 @@ double spindle_x;   /* and so the spindle sits here, in the chopper's own frame 
 double spindle_y;
 double v0;          /* the single speed every ray is given */
 double chopper_z;   /* how far the disc is from the source */
-#pragma acc declare create(v0,chopper_z)
+#pragma acc declare create(edges,v0,chopper_z)
 %}
 
 INITIALIZE
@@ -126,7 +126,7 @@ chopper_z = 1.0;
 
 printf("NXdisk_chopper_image: %d x %d pixels over %g m; run with -n %lld\n",
        npix, npix, field, (long long) npix * (long long) npix);
-#pragma acc update device(v0,chopper_z)
+#pragma acc update device(edges[0:10],v0,chopper_z)
 %}
 
 TRACE
