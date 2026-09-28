@@ -28,6 +28,18 @@
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.2.2
+ *     Nothing here computes anything differently. The library is licensed now, under
+ *     BSD-3-Clause: the text is in `LICENSE`, and this file and every other one McCode
+ *     fetches opens with an SPDX line and the copyright notice, because McCode takes each
+ *     file on its own and the terms have to travel with it.
+ *
+ *     The `.mccode/` templates that tell McCode which files to take also offer
+ *     `Polygon_ESS_butterfly` and its example instrument now, and name the licence. And
+ *     `NXdisk_chopper_image` runs under OpenACC: what its TRACE reads is put on the device
+ *     explicitly, and it reads its parameters through `INSTRUMENT_GETPAR`, since the
+ *     `instrument` pointer is never updated there.
+ *
  * 4.2.1
  *     `range_set_sort` merges correctly. It lost the extent of a range containing the one
  *     after it, and its answer depended on the order `qsort` left tied lower edges in --
@@ -100,7 +112,7 @@
  */
 #define CHOPPER_LIB_VERSION_MAJOR 4
 #define CHOPPER_LIB_VERSION_MINOR 2
-#define CHOPPER_LIB_VERSION_PATCH 1
+#define CHOPPER_LIB_VERSION_PATCH 2
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
 #define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
                            + CHOPPER_LIB_VERSION_MINOR * 100 \
