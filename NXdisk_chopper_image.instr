@@ -93,6 +93,7 @@ double spindle_x;   /* and so the spindle sits here, in the chopper's own frame 
 double spindle_y;
 double v0;          /* the single speed every ray is given */
 double chopper_z;   /* how far the disc is from the source */
+#pragma acc declare create(edges,v0,chopper_z)
 %}
 
 INITIALIZE
@@ -125,6 +126,7 @@ chopper_z = 1.0;
 
 printf("NXdisk_chopper_image: %d x %d pixels over %g m; run with -n %lld\n",
        npix, npix, field, (long long) npix * (long long) npix);
+#pragma acc update device(edges[0:10],v0,chopper_z)
 %}
 
 TRACE
@@ -148,12 +150,18 @@ EXTEND
   /* An instrument parameter's short name is a macro, and it is only defined
    * around the instrument's own INITIALIZE and FINALLY -- an EXTEND block is
    * emitted inside the component's trace function, where it has been #undef'd.
-   * What the macro expands to is reachable from anywhere, so read it directly. */
-  long long n = instrument->_parameters.npix;
+   *
+   * Read it with INSTRUMENT_GETPAR, which expands to the global
+   * `_instrument_var._parameters.<par>`. Do not go through `instrument->`: that
+   * pointer is declared on the device but never updated there, so under OpenACC
+   * it dereferences a host (or null) address and the kernel dies with
+   * CUDA_ERROR_ILLEGAL_ADDRESS. `_instrument_var` itself is uploaded in init(). */
+  long long n = INSTRUMENT_GETPAR(npix);
+  double fld = INSTRUMENT_GETPAR(field);
   long long col = idx % n;
   long long row = (idx / n) % n;
-  x = instrument->_parameters.field * (((double) col + 0.5) / (double) n - 0.5);
-  y = instrument->_parameters.field * (((double) row + 0.5) / (double) n - 0.5);
+  x = fld * (((double) col + 0.5) / (double) n - 0.5);
+  y = fld * (((double) row + 0.5) / (double) n - 0.5);
   z = 0;
   vx = 0; vy = 0; vz = v0;
   /* Emitted early, so that PROP_Z0 in the chopper lands the ray on the disc at
