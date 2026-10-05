@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: BSD-3-Clause
-// Copyright (c) 2026 Gregory Tucker, ESS ERIC
 /*******************************************************************************
 * Instrument: NXdisk_chopper_display
 *
@@ -19,18 +17,18 @@
 *
 * Run it two ways and compare:
 *
-*   mcstas-antlr chopper_display.instr
-*   ./chopper_display.out --trace   -n 1    # circles and a spoke, the old rendering
-*   ./chopper_display.out --trace=2 -n 1    # a triangulated polygon per disc
+*   mcstas-antlr NXdisk_chopper_display.instr
+*   ./NXdisk_chopper_display.out --trace   -n 1    # circles and a spoke, the old rendering
+*   ./NXdisk_chopper_display.out --trace=2 -n 1    # a triangulated polygon per disc
 *
 * The second prints one `MCDISPLAY: polyhedron { ... }` line per disc, in the JSON
 * `mcdis_polygon` builds for `mcdis_polyhedron`. To check one by hand:
 *
-*   ./chopper_display.out --trace=2 -n 1 \
+*   ./NXdisk_chopper_display.out --trace=2 -n 1 \
 *     | grep '^MCDISPLAY: polyhedron' | head -1 \
 *     | sed 's/^MCDISPLAY: polyhedron //' | python3 -m json.tool | head
 *
-* Or view it: `mcdisplay-webgl chopper_display.instr` (any mcdisplay backend that
+* Or view it: `mcdisplay-webgl NXdisk_chopper_display.instr` (any mcdisplay backend that
 * understands the polyhedron directive).
 *
 * %P
@@ -38,7 +36,9 @@
 *
 * %E
 *******************************************************************************/
-DEFINE INSTRUMENT chopper_display(nu = 14)
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Gregory Tucker, ESS ERIC
+DEFINE INSTRUMENT NXdisk_chopper_display(nu = 14)
 
 DECLARE 
 %{
