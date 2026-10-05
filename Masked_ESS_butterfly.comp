@@ -1,10 +1,14 @@
-// SPDX-License-Identifier: BSD-3-Clause
-// Copyright (c) 2026 Gregory Tucker, ESS ERIC
 /*******************************************************************************
 * Component: Masked_ESS_butterfly
 *
+* %I
+* Written by: Gregory Tucker
+* Date: 2026
+* Origin: European Spallation Source ERIC
+*
 * An ESS_butterfly source that emits only where a chopper train lets neutrons through.
 *
+* %D
 * `choppers` is a `chopper_parameters` array reinterpreted as `double *`, which is the
 * only pointer a McStas SETTING PARAMETER can carry. It was four doubles per chopper
 * before chopper-lib 4.0.0 and is a structure holding a pointer now, so an instrument
@@ -103,13 +107,19 @@
 *                                     the acceptance that resample=1 corrects every ray weight by, and should
 *                                     match it -- it is counted from the run, where the acceptance comes from
 *                                     the mask geometry alone, so the two agreeing is a real check
-
+*
+* %L
+* chopper-lib: https://github.com/mcdotstar/mcstas-chopper-lib
+*
+* %E
 *******************************************************************************/
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Gregory Tucker, ESS ERIC
 DEFINE COMPONENT Masked_ESS_butterfly
 INHERIT ESS_butterfly
 DEFINITION PARAMETERS ()
 SETTING PARAMETERS (
-  double * choppers,
+  vector choppers,
   int chopper_count,
   double inverse_velocity_bin,
   double time_bin,
