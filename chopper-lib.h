@@ -28,6 +28,9 @@
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.2.3
+ *     Only changes in comment strings to support McCode's mcdoc parsing.
+ *
  * 4.2.2
  *     Nothing here computes anything differently. The library is licensed now, under
  *     BSD-3-Clause: the text is in `LICENSE`, and this file and every other one McCode
@@ -112,7 +115,7 @@
  */
 #define CHOPPER_LIB_VERSION_MAJOR 4
 #define CHOPPER_LIB_VERSION_MINOR 2
-#define CHOPPER_LIB_VERSION_PATCH 2
+#define CHOPPER_LIB_VERSION_PATCH 3
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
 #define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
                            + CHOPPER_LIB_VERSION_MINOR * 100 \
