@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Gregory Tucker, ESS ERIC
+/*******************************************************************************
+* Instrument: NXdisk_chopper_transmission
+*
+* %I
+* Written by: Gregory Tucker
+* Date: 2026
+* Origin: European Spallation Source ERIC
+*
+* Count what a pencil beam gets past one NXdisk_chopper with a single opening.
+*
+* %D
+* The transmission counterpart of NXdisk_chopper_image. A monochromatic pencil beam
+* runs straight down the axis, so every ray reaches the disc at the same time and the
+* only thing deciding whether it passes is the disc: where its opening is, whether it
+* is parked or turning, and where the beam crosses it. A one-pixel PSD past the disc
+* counts what got through.
+*
+* Everything a test varies is a parameter, so one compiled instrument answers all of
+* them: the opening's two edges, the disc's motion, its two angles, whether rays that
+* miss the disc are absorbed, and how far the disc is moved off the beam.
+*
+* %P
+* edge_open: [deg]  opening edge of the one slit, from the zero mark
+* edge_close: [deg] closing edge; must exceed edge_open by less than 360
+* nu: [Hz]          signed rotation frequency; 0 parks the disc at park
+* delay: [s]        when the zero mark is on the beam, read only when nu is non-zero
+* park: [deg]       where the zero mark stands while parked
+* beam_angle: [deg] where the beam crosses the disc, from the zero mark
+* zero_angle: [deg] from +y to the top-dead-centre pickup
+* abs_out: [1]      absorb rays that miss the disc entirely
+* offset_y: [m]     the disc's displacement in y; the beam stays on the axis
+*
+* %E
+*******************************************************************************/
+DEFINE INSTRUMENT NXdisk_chopper_transmission(
+  edge_open = 170,
+  edge_close = 190,
+  nu = 0,
+  delay = 0,
+  park = 0,
+  beam_angle = 0,
+  zero_angle = 0,
+  int abs_out = 1,
+  offset_y = 0
+)
+
+DECLARE
+%{
+double * edges;
+%}
+
+INITIALIZE
+%{
+edges = (double *) calloc(2, sizeof(double));
+edges[0] = edge_open;
+edges[1] = edge_close;
+%}
+
+TRACE
+
+COMPONENT origin = Progress_bar()
+AT (0, 0, 0) ABSOLUTE
+
+/* 5 meV and no spread: every ray arrives at the disc ~1.02 ms after leaving */
+COMPONENT source = Source_simple(
+  radius = 0.001, dist = 1, focus_xw = 0.002, focus_yh = 0.002,
+  E0 = 5, dE = 0, flux = 1e10
+) AT (0, 0, 0) ABSOLUTE
+
+COMPONENT chopper = NXdisk_chopper(
+  slit_edges = edges, n_edges = 2, radius = 0.35, yheight = 0.06,
+  nu = nu, delay = delay, park_angle = park,
+  beam_angle = beam_angle, zero_angle = zero_angle, abs_out = abs_out
+) AT (0, offset_y, 1) ABSOLUTE
+
+COMPONENT past = PSD_monitor(
+  nx = 1, ny = 1, filename = "past", xwidth = 0.02, yheight = 0.02,
+  restore_neutron = 0
+) AT (0, 0, 2) ABSOLUTE
+
+FINALLY
+%{
+if (edges) free(edges);
+%}
+
+END
