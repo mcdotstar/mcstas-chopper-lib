@@ -190,8 +190,8 @@ range_set range_intersection(range_set ain, range_set bin);
  * @param path The path length from the 'zero'-time source to the disk position, in meters
  * @param aperture The angular width of the beam where it crosses the disk, in degrees
  *
- * `edges` is the `slit_edges` of the NeXus NXdisk_chopper specification, and what McStas'
- * `CollectorDiskChopper` takes: an even number of angles measured from the top-dead-centre
+ * `edges` is the `slit_edges` of the NeXus NXdisk_chopper specification, and what this
+ * library's `NXdisk_chopper` component takes: an even number of angles measured from the top-dead-centre
  * mark, strictly increasing, the opening edge of each slit first, spanning less than one
  * turn. A slit straddling the mark is written with a final edge past 360 -- `{350, 370}`
  * rather than `{350, 10}` -- so the pairs stay ordered and each width is a difference.

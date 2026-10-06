@@ -177,7 +177,7 @@ the compiler and gives a per-file summary plus annotated sources under `coverage
 ## Describing a chopper
 
 `chopper_parameters` is `{speed, delay, beam, edge_count, edges, path, aperture}`, and describes a
-disk the way the NeXus `NXdisk_chopper` standard and the `CollectorDiskChopper` McStas
+disk the way the NeXus `NXdisk_chopper` standard and this library's `NXdisk_chopper` McStas
 component do: `edges` is a flat, increasing list of angles in degrees measured from the
 disk's own zero mark, two per opening, and `beam` is the angle of the mark that is on the
 beam path at `delay`. An edge at angle `a` is on the beam path at
