@@ -18,7 +18,7 @@ except ImportError:
                 "installed niess does not provide", allow_module_level=True)
 
 from mccode_antlr import Flavor
-from niess.components import ESSource
+from niess.components import ESSModerator
 from scipp import Variable
 
 
@@ -35,21 +35,21 @@ class Timer(ContextDecorator):
         self.interval = self.end - self.start
         print(f'Timer [{self.name}]: {self.interval:.3f} s')
 
-class MaskedESSource(ESSource):
+class MaskedESSModerator(ESSModerator):
     identifier_choppers: str
     identifier_chopper_count: str
     inverse_velocity_bin: Variable
     time_bin: Variable
 
     @classmethod
-    def from_source(cls, source: ESSource, cal: dict):
+    def from_moderator(cls, moderator: ESSModerator, cal: dict):
         from scipp import scalar
-        source_dict = source.to_dict()
+        moderator_dict = moderator.to_dict()
         identifier_choppers = cal.get('identifier_choppers', 'choppers')
         identifier_chopper_count = cal.get('identifier_chopper_count', 'chopper_count')
         inverse_velocity_bin = cal.get('inverse_velocity_bin', scalar(0.001, unit='s/m'))
         time_bin = cal.get('time_bin', scalar(0.001, unit='s'))
-        return cls(**source_dict,
+        return cls(**moderator_dict,
                    identifier_choppers=identifier_choppers,
                    identifier_chopper_count=identifier_chopper_count,
                    inverse_velocity_bin=inverse_velocity_bin,
@@ -160,11 +160,11 @@ def bifrost_primary(masked: bool = False):
     name = 'bifrost_masked_ess_source' if masked else 'bifrost_ess_source'
     assembler = Assembler(name, flavor=Flavor.MCSTAS, registries=get_registries())
     primary = Primary.from_calibration()
-    primary.source.n_pulses = 1
-    primary.source.accelerator_power = scalar(2.0, unit='MW')
+    primary.moderator.n_pulses = 1
+    primary.moderator.accelerator_power = scalar(2.0, unit='MW')
 
     if masked:
-        primary.source = MaskedESSource.from_source(primary.source, {
+        primary.moderator = MaskedESSModerator.from_moderator(primary.moderator, {
             'identifier_choppers': 'chopper_ptr',
             'identifier_chopper_count': 'chopper_cnt',
             'inverse_velocity_bin': scalar(0.001, unit='s/m'),
@@ -195,9 +195,10 @@ def bifrost_chopper_params(e_max, t_psc):
         'bw2': 'bandwidth_chopper_2',
     }
     pars = bifrost(e_max, 0, t_psc)
-    # chopcal dropped Chopper.phase in 0.5.0; a delay in seconds is what both it and the
-    # instrument deal in now, and `<name>delay` is what niess declares the knob as.
-    vals = [f'{v}{y}={getattr(pars[x],y)}' for x, v in names.items() for y in ('delay', 'speed')]
+    # chopcal gives the delay in seconds and the speed in Hz; niess declares each disc's
+    # knobs as `<name>_delay` in ns and `<name>_rotation_speed` in Hz.
+    vals = [f'{v}_delay={pars[x].delay * 1e9}' for x, v in names.items()]
+    vals += [f'{v}_rotation_speed={pars[x].speed}' for x, v in names.items()]
     return ' '.join(vals)
 
 
