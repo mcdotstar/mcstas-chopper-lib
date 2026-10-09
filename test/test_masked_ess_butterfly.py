@@ -246,7 +246,8 @@ def test_compare_bifrost_masked_vs_unmasked_ess_source():
     masked = scipp_monitor_data(output_masked)
     diff = (unmasked - masked).sum().data
 
-    from loguru import logger
+    import logging
+    logger = logging.getLogger(__name__)
     mt = masked_times['run_time']
     ut = unmasked_times['run_time']
     logger.info(f"Masked ({mt} s) vs unmasked ({ut} s) difference = {diff:c}")
