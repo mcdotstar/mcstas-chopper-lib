@@ -102,6 +102,30 @@ cells. The grid sampler can only over-estimate it, because a partly covered cell
 weighted whole — on a BIFROST train over a wide source that is 6.7% high on a
 twelve-million-cell grid, and it improves only as fast as the cell count.
 
+### How likely, not only whether
+
+With an `aperture`, the region's boundary is where transmission falls to zero. Inside it an
+edge takes `aperture / 360 / |speed|` to sweep across the beam, and for a uniformly lit beam
+the transmission ramps linearly while it does. Since 4.3.0, `chopper_weighted_set` carries
+that ramp: the same convex polygons, each with a product of affine factors.
+
+```c
+chopper_weighted_set set = chopper_weighted_set_empty();
+chopper_weighted_set_add_polygons(&set, &source_set);
+const unsigned groups[6] = {0, 0, 1, 2, 3, 3};     /* pairs sharing a housing */
+chopper_weighted_set_transmit_train(&set, 6, choppers, groups);
+
+const double effective = chopper_weighted_set_integral(&set);    /* s^2/m, exact */
+const double here = chopper_weighted_set_transmission(&set, inverse_velocity, time);
+```
+
+Disks in one group are crossed at the same place across the beam, so the group passes the
+part of the beam open in all of them. For a pair turning the same way that is the smaller
+of the two transmissions; for a counter-rotating pair it is not, because equal openings
+sweeping from opposite sides stay shut until the edges meet and then open twice as fast.
+Different groups multiply. A lone disk's ramps integrate to exactly its point-beam opening.
+See the header's section on transmission probability for the rule.
+
 ### A beam that does not travel in a straight line
 
 A neutron in a guide travels further than the straight line, and how much further depends

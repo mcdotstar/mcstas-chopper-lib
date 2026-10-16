@@ -1144,6 +1144,345 @@ void chopper_polygon_sampler_draw(const chopper_polygon_sampler * sampler,
   }
 }
 
+/*************************** transmission probability *********************************/
+
+chopper_weighted_set chopper_weighted_set_empty(void) {
+  chopper_weighted_set set;
+  set.count = 0;
+  set.capacity = 0;
+  set.polygon = NULL;
+  return set;
+}
+
+int chopper_weighted_set_add(chopper_weighted_set * set,
+                             const chopper_weighted_polygon * polygon) {
+  if (set == NULL || polygon == NULL) return 0;
+  if (chopper_polygon_is_negligible(&polygon->polygon)) return 1;
+  if (set->count == set->capacity) {
+    const unsigned capacity = set->capacity ? 2 * set->capacity : 8;
+    chopper_weighted_polygon * grown = (chopper_weighted_polygon *) realloc(
+        set->polygon, capacity * sizeof(chopper_weighted_polygon));
+    if (grown == NULL) {
+      printf("Out of memory holding %u weighted polygons\n", capacity);
+      return 0;
+    }
+    set->polygon = grown;
+    set->capacity = capacity;
+  }
+  set->polygon[set->count++] = *polygon;
+  return 1;
+}
+
+int chopper_weighted_set_add_polygons(chopper_weighted_set * set,
+                                      const chopper_polygon_set * polygons) {
+  if (set == NULL) return 0;
+  if (polygons == NULL) return 1;
+  for (unsigned i = 0; i < polygons->count; ++i) {
+    chopper_weighted_polygon piece;
+    piece.polygon = polygons->polygon[i];
+    piece.factor_count = 0;
+    if (!chopper_weighted_set_add(set, &piece)) return 0;
+  }
+  return 1;
+}
+
+void chopper_weighted_set_free(chopper_weighted_set * set) {
+  if (set == NULL) return;
+  if (set->polygon) free(set->polygon);
+  *set = chopper_weighted_set_empty();
+}
+
+double chopper_affine_value(const chopper_affine f, const double inverse_velocity,
+                            const double time) {
+  return f.a * inverse_velocity + f.b * time + f.c;
+}
+
+double chopper_weighted_polygon_weight(const chopper_weighted_polygon * polygon,
+                                       const double inverse_velocity, const double time) {
+  if (polygon == NULL) return 0.0;
+  double weight = 1.0;
+  for (unsigned k = 0; k < polygon->factor_count; ++k) {
+    weight *= chopper_affine_value(polygon->factor[k], inverse_velocity, time);
+  }
+  return weight;
+}
+
+/** The integral over one triangle of a product of affine factors.
+ *
+ * Each factor is `sum_j f(p_j) lambda_j` in barycentric coordinates, so the product
+ * expands into monomials, and over a triangle of area A
+ *
+ *     integral of lambda_0^i lambda_1^j lambda_2^k = 2 A i! j! k! / (i + j + k + 2)!
+ *
+ * Expanding by which vertex each factor takes its value from is 3^K terms -- 6561 at the
+ * most this file allows, and a handful for a real train.
+ */
+static double chopper_triangle_integral(const chopper_point p0, const chopper_point p1,
+                                        const chopper_point p2, const unsigned count,
+                                        const chopper_affine * factor) {
+  const double area = 0.5 * fabs((p1.inverse_velocity - p0.inverse_velocity)
+                                 * (p2.time - p0.time)
+                                 - (p2.inverse_velocity - p0.inverse_velocity)
+                                 * (p1.time - p0.time));
+  if (count == 0) return area;
+  double value[CHOPPER_WEIGHT_MAX_FACTORS][3];
+  const chopper_point p[3] = {p0, p1, p2};
+  for (unsigned k = 0; k < count; ++k) {
+    for (unsigned j = 0; j < 3; ++j) {
+      value[k][j] = chopper_affine_value(factor[k], p[j].inverse_velocity, p[j].time);
+    }
+  }
+  double factorial[CHOPPER_WEIGHT_MAX_FACTORS + 3];
+  factorial[0] = 1.0;
+  for (unsigned n = 1; n < CHOPPER_WEIGHT_MAX_FACTORS + 3; ++n) {
+    factorial[n] = factorial[n - 1] * (double) n;
+  }
+  unsigned terms = 1;
+  for (unsigned k = 0; k < count; ++k) terms *= 3;
+  double sum = 0.0;
+  for (unsigned term = 0; term < terms; ++term) {
+    unsigned which = term, n[3] = {0, 0, 0};
+    double product = 1.0;
+    for (unsigned k = 0; k < count; ++k) {
+      const unsigned j = which % 3;
+      which /= 3;
+      product *= value[k][j];
+      ++n[j];
+    }
+    sum += product * factorial[n[0]] * factorial[n[1]] * factorial[n[2]];
+  }
+  return 2.0 * area * sum / factorial[count + 2];
+}
+
+double chopper_weighted_polygon_integral(const chopper_weighted_polygon * polygon) {
+  if (polygon == NULL || polygon->polygon.count < 3) return 0.0;
+  const chopper_point * v = polygon->polygon.vertex;
+  double total = 0.0;
+  for (unsigned i = 1; i + 1 < polygon->polygon.count; ++i) {
+    total += chopper_triangle_integral(v[0], v[i], v[i + 1], polygon->factor_count,
+                                       polygon->factor);
+  }
+  return total;
+}
+
+double chopper_weighted_set_integral(const chopper_weighted_set * set) {
+  if (set == NULL) return 0.0;
+  double total = 0.0;
+  for (unsigned i = 0; i < set->count; ++i) {
+    total += chopper_weighted_polygon_integral(&set->polygon[i]);
+  }
+  return total;
+}
+
+double chopper_weighted_set_transmission(const chopper_weighted_set * set,
+                                         const double inverse_velocity, const double time) {
+  if (set == NULL) return 0.0;
+  double total = 0.0;
+  for (unsigned i = 0; i < set->count; ++i) {
+    if (chopper_polygon_contains(&set->polygon[i].polygon, inverse_velocity, time)) {
+      total += chopper_weighted_polygon_weight(&set->polygon[i], inverse_velocity, time);
+    }
+  }
+  return total;
+}
+
+/** One disk's chosen opening and turn: where its edges cross the beam centre, `o` and
+ * `c`, the aperture time `h`, its path, and which way its edges sweep the beam. */
+struct chopper_weighted_choice_struct {
+  double o;
+  double c;
+  double h;
+  double path;
+  double sweep;
+};
+typedef struct chopper_weighted_choice_struct chopper_weighted_choice;
+
+static int chopper_affine_same(const chopper_affine f, const chopper_affine g) {
+  const double scale = fabs(f.a) + fabs(f.b) + fabs(f.c) + fabs(g.a) + fabs(g.b) + fabs(g.c);
+  return fabs(f.a - g.a) + fabs(f.b - g.b) + fabs(f.c - g.c) <= 1e-14 * scale;
+}
+
+/** Keep the part of a polygon where `f <= g`. 0 on vertex overflow. */
+static int chopper_polygon_clip_below(chopper_polygon * polygon, const chopper_affine f,
+                                      const chopper_affine g) {
+  return chopper_polygon_clip_halfplane(polygon, f.a - g.a, f.b - g.b, g.c - f.c);
+}
+
+/** Split one piece, already inside every chosen opening's support, by which bound is the
+ * greatest lower and which the least upper, and give each part its transmission. */
+static int chopper_weighted_emit(chopper_weighted_set * out,
+                                 const chopper_weighted_polygon * piece,
+                                 const unsigned count,
+                                 const chopper_weighted_choice * choice) {
+  chopper_affine lower[CHOPPER_WEIGHT_MAX_FACTORS + 1], upper[CHOPPER_WEIGHT_MAX_FACTORS + 1];
+  unsigned lowers = 0, uppers = 0;
+  const chopper_affine minus_one = {0.0, 0.0, -1.0}, one = {0.0, 0.0, 1.0};
+  lower[lowers++] = minus_one;
+  upper[uppers++] = one;
+  for (unsigned i = 0; i < count && i < CHOPPER_WEIGHT_MAX_FACTORS; ++i) {
+    const chopper_weighted_choice d = choice[i];
+    if (d.h <= 0.0) continue;  /* a point beam: its support already is its edges */
+    /* s = path * inverse_velocity + time, and the bounds are (s - c)/h and (s - o)/h for
+     * a disk sweeping forwards, (o - s)/h and (c - s)/h for one sweeping backwards. */
+    const double k = d.sweep / d.h;
+    chopper_affine lo = {k * d.path, k, -k * (d.sweep > 0 ? d.c : d.o)};
+    chopper_affine hi = {k * d.path, k, -k * (d.sweep > 0 ? d.o : d.c)};
+    int seen = 0;
+    for (unsigned j = 0; j < lowers; ++j) seen |= chopper_affine_same(lower[j], lo);
+    if (!seen) lower[lowers++] = lo;
+    seen = 0;
+    for (unsigned j = 0; j < uppers; ++j) seen |= chopper_affine_same(upper[j], hi);
+    if (!seen) upper[uppers++] = hi;
+  }
+  for (unsigned x = 0; x < lowers; ++x) {
+    for (unsigned y = 0; y < uppers; ++y) {
+      chopper_weighted_polygon part = *piece;
+      int ok = 1;
+      for (unsigned j = 0; ok && j < lowers && part.polygon.count; ++j) {
+        if (j != x) ok = chopper_polygon_clip_below(&part.polygon, lower[j], lower[x]);
+      }
+      for (unsigned j = 0; ok && j < uppers && part.polygon.count; ++j) {
+        if (j != y) ok = chopper_polygon_clip_below(&part.polygon, upper[y], upper[j]);
+      }
+      if (ok && part.polygon.count) {
+        ok = chopper_polygon_clip_below(&part.polygon, lower[x], upper[y]);
+      }
+      if (!ok) {
+        printf("A weighted polygon needs more than %d vertices; raise "
+               "CHOPPER_POLYGON_MAX_VERTICES\n", CHOPPER_POLYGON_MAX_VERTICES);
+        return 0;
+      }
+      if (part.polygon.count < 3) continue;
+      const chopper_affine t = {(upper[y].a - lower[x].a) / 2.0,
+                                (upper[y].b - lower[x].b) / 2.0,
+                                (upper[y].c - lower[x].c) / 2.0};
+      const int certain = t.a == 0.0 && t.b == 0.0 && fabs(t.c - 1.0) < 1e-15;
+      if (!certain) {
+        if (part.factor_count >= CHOPPER_WEIGHT_MAX_FACTORS) {
+          printf("A weighted polygon lies on the ramps of more than %d groups; raise "
+                 "CHOPPER_WEIGHT_MAX_FACTORS\n", CHOPPER_WEIGHT_MAX_FACTORS);
+          return 0;
+        }
+        part.factor[part.factor_count++] = t;
+      }
+      if (!chopper_weighted_set_add(out, &part)) return 0;
+    }
+  }
+  return 1;
+}
+
+/** Choose an opening and a turn of disk `index`, and of every disk after it, keeping the
+ * part of `piece` inside all their supports; then split what is left. */
+static int chopper_weighted_descend(chopper_weighted_set * out,
+                                    const chopper_weighted_polygon * piece,
+                                    const unsigned index, const unsigned count,
+                                    const chopper_parameters * disks,
+                                    chopper_weighted_choice * choice) {
+  if (index == count) return chopper_weighted_emit(out, piece, count, choice);
+  const chopper_parameters disk = disks[index];
+  const double tau = 1.0 / fabs(disk.speed);
+  const double h = chopper_aperture_time(disk);
+  double s_lo = 0.0, s_hi = 0.0;
+  chopper_polygon_extent(&piece->polygon, disk.path, 1.0, &s_lo, &s_hi);
+  for (unsigned w = 0; w < disk.edge_count / 2; ++w) {
+    double o = chopper_edge_time(disk, disk.edges[2 * w]);
+    double c = chopper_edge_time(disk, disk.edges[2 * w + 1]);
+    if (c < o) { const double swap = o; o = c; c = swap; }
+    const long first = (long) floor((s_lo - (c + h)) / tau);
+    const long last = (long) ceil((s_hi - (o - h)) / tau);
+    for (long n = first; n <= last; ++n) {
+      chopper_weighted_polygon next = *piece;
+      const double shift = (double) n * tau;
+      if (!chopper_polygon_clip_wedge(&next.polygon, disk.path, disk.path, 1.0,
+                                      o + shift - h, c + shift + h)) {
+        printf("A weighted polygon needs more than %d vertices; raise "
+               "CHOPPER_POLYGON_MAX_VERTICES\n", CHOPPER_POLYGON_MAX_VERTICES);
+        return 0;
+      }
+      if (next.polygon.count < 3) continue;
+      choice[index].o = o + shift;
+      choice[index].c = c + shift;
+      choice[index].h = h;
+      choice[index].path = disk.path;
+      choice[index].sweep = disk.speed > 0 ? 1.0 : -1.0;
+      if (!chopper_weighted_descend(out, &next, index + 1, count, disks, choice)) return 0;
+    }
+  }
+  return 1;
+}
+
+int chopper_weighted_set_transmit_group(chopper_weighted_set * set, const unsigned count,
+                                        const chopper_parameters * disks) {
+  if (set == NULL || (count && disks == NULL)) return 0;
+  if (count > CHOPPER_WEIGHT_MAX_FACTORS) {
+    printf("A group of %u disks is more than the %d one weighted polygon can follow\n",
+           count, CHOPPER_WEIGHT_MAX_FACTORS);
+    chopper_weighted_set_free(set);
+    return 0;
+  }
+  chopper_parameters active[CHOPPER_WEIGHT_MAX_FACTORS];
+  unsigned m = 0;
+  for (unsigned i = 0; i < count; ++i) {
+    const chopper_parameters disk = disks[i];
+    if (disk.edge_count < 2 || disk.edges == NULL) {
+      chopper_weighted_set_free(set);  /* no openings at all is a beam stop */
+      return 1;
+    }
+    if (disk.speed == 0.0) {
+      if (chopper_parked_is_open(disk)) continue;
+      printf("chopper-lib: nothing gets through a chopper parked with the beam at %g "
+             "degrees, where the disk is solid; the train transmits nothing.\n", disk.beam);
+      chopper_weighted_set_free(set);
+      return 1;
+    }
+    int always_open = 0;
+    for (unsigned w = 0; w < disk.edge_count / 2; ++w) {
+      const double width = fabs(chopper_edge_time(disk, disk.edges[2 * w + 1])
+                                - chopper_edge_time(disk, disk.edges[2 * w]));
+      if (width >= 1.0 / fabs(disk.speed)) always_open = 1;
+    }
+    if (!always_open) active[m++] = disk;
+  }
+  if (m == 0) return 1;
+  chopper_weighted_choice choice[CHOPPER_WEIGHT_MAX_FACTORS];
+  chopper_weighted_set out = chopper_weighted_set_empty();
+  for (unsigned i = 0; i < set->count; ++i) {
+    if (!chopper_weighted_descend(&out, &set->polygon[i], 0, m, active, choice)) {
+      chopper_weighted_set_free(&out);
+      chopper_weighted_set_free(set);
+      return 0;
+    }
+  }
+  chopper_weighted_set_free(set);
+  *set = out;
+  return 1;
+}
+
+int chopper_weighted_set_transmit_train(chopper_weighted_set * set, const unsigned count,
+                                        const chopper_parameters * disks,
+                                        const unsigned * groups) {
+  if (set == NULL || (count && disks == NULL)) return 0;
+  unsigned i = 0;
+  while (i < count && set->count) {
+    unsigned j = i + 1;
+    if (groups) {
+      while (j < count && groups[j] == groups[i]) ++j;
+      for (unsigned k = j; k < count; ++k) {
+        if (groups[k] == groups[i]) {
+          printf("Disks %u and %u share group %u but are not adjacent; a group is disks "
+                 "close enough to share a housing, so list them together\n", i, k,
+                 groups[i]);
+          chopper_weighted_set_free(set);
+          return 0;
+        }
+      }
+    }
+    if (!chopper_weighted_set_transmit_group(set, j - i, disks + i)) return 0;
+    i = j;
+  }
+  return 1;
+}
+
 static void chopper_write_axes_to_file(FILE * file,
     const double * inverse_velocities, const unsigned inverse_velocity_count,
     const double * times, const unsigned time_count) {
