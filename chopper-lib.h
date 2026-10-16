@@ -28,6 +28,14 @@
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.3.0
+ *     `chopper_weighted_set` carries how likely a neutron is to get through, not only
+ *     whether it can: an edge of a disk with an `aperture` ramps the transmission
+ *     linearly across the beam, disks sharing a housing pass the part of the beam open in
+ *     all of them, and groups further apart multiply. See the section note on
+ *     transmission probability. Additive: nothing already described means anything
+ *     different.
+ *
  * 4.2.3
  *     Only changes in comment strings to support McCode's mcdoc parsing.
  *
@@ -114,8 +122,8 @@
  *     Unversioned releases, taking `phase`.
  */
 #define CHOPPER_LIB_VERSION_MAJOR 4
-#define CHOPPER_LIB_VERSION_MINOR 2
-#define CHOPPER_LIB_VERSION_PATCH 3
+#define CHOPPER_LIB_VERSION_MINOR 3
+#define CHOPPER_LIB_VERSION_PATCH 0
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
 #define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
                            + CHOPPER_LIB_VERSION_MINOR * 100 \
@@ -840,6 +848,146 @@ void chopper_polygon_sampler_draw(const chopper_polygon_sampler * sampler,
                                   double triangle_deviate, double first_deviate,
                                   double second_deviate,
                                   double * inverse_velocity, double * time);
+
+/*************************** transmission probability *********************************/
+
+/** \section weighted How likely a neutron is to get through, not only whether it can
+ *
+ * `chopper_polygon_set_transmit` with a disk `aperture` keeps every neutron some part of
+ * the beam could carry through: the boundary is where transmission falls to zero. Inside,
+ * an edge takes `aperture / 360 / |speed|` to sweep across the beam, and a neutron
+ * arriving while it does is passed only by the part of the beam the opening has reached.
+ * For a uniformly lit beam that part grows linearly with time, so between nothing and
+ * fully open the transmission is a linear ramp.
+ *
+ * Measure position across the beam by `x` in [-1, 1], scaled so that an edge crosses the
+ * whole beam in the aperture time `h`. A disk turning forwards (positive speed) is open at
+ * `x` when the neutron arrives at `s` with
+ *
+ *     (s - c) / h <= x <= (s - o) / h
+ *
+ * for an opening whose edges cross the beam centre at `o` and `c`; one turning backwards
+ * mirrors that, `(o - s) / h <= x <= (c - s) / h`. Each bound is affine in (inverse
+ * velocity, time), since `s = time + path * inverse_velocity`.
+ *
+ * Disks close enough together that a neutron crosses them at the same `x` -- a pair
+ * sharing a housing -- form a *group*, and the group passes the part of the beam open in
+ * all of them:
+ *
+ *     T = max(0, min(1, min_i upper_i) - max(-1, max_i lower_i)) / 2
+ *
+ * For a pair turning the same way the intervals are nested and this is the smaller of the
+ * two transmissions. For a pair turning opposite ways it is not: equal openings sweeping
+ * from opposite sides stay shut until the edges meet at the half-way time and then open
+ * twice as fast, which is what counter-rotation is for. Within a group the direction of
+ * sweep is taken from the sign of each speed, so the disks of a group must be mounted the
+ * same way round the beam.
+ *
+ * Groups far enough apart along a guide that reflections scramble `x` between them pass
+ * independently, so their transmissions multiply.
+ *
+ * Every term above is affine on a convex piece where the choice of maximum and minimum is
+ * fixed, so the answer is again a union of convex polygons, each now carrying a product of
+ * affine factors -- one per group whose ramp it lies in. Pieces may overlap where two
+ * openings of one disk ramp at once; their transmissions then add, because the parts of
+ * the beam they pass are disjoint. `chopper_weighted_set_integral` sums accordingly.
+ *
+ * A disk with no `aperture` is a point beam and contributes a sharp edge, as everywhere
+ * else in this file. A path spread is not supported here.
+ */
+
+/** An affine function of the plane, `a * inverse_velocity + b * time + c`. */
+struct chopper_affine_struct {
+  double a;
+  double b;
+  double c;
+};
+typedef struct chopper_affine_struct chopper_affine;
+
+/** How many groups one polygon can be on the ramp of at once. */
+#define CHOPPER_WEIGHT_MAX_FACTORS 8
+
+/** A convex region carrying a transmission probability: the product of its factors. */
+struct chopper_weighted_polygon_struct {
+  chopper_polygon polygon;
+  unsigned factor_count;
+  chopper_affine factor[CHOPPER_WEIGHT_MAX_FACTORS];
+};
+typedef struct chopper_weighted_polygon_struct chopper_weighted_polygon;
+
+/** A union of weighted pieces, whose transmissions add where they overlap. */
+struct chopper_weighted_set_struct {
+  unsigned count;
+  unsigned capacity;
+  chopper_weighted_polygon * polygon;
+};
+typedef struct chopper_weighted_set_struct chopper_weighted_set;
+
+/** A set holding nothing, owning nothing. */
+chopper_weighted_set chopper_weighted_set_empty(void);
+
+/** Append a copy of `polygon`, dropping it if it has no area. 0 if memory ran out. */
+int chopper_weighted_set_add(chopper_weighted_set * set,
+                             const chopper_weighted_polygon * polygon);
+
+/** Append every polygon of `polygons`, each certain to pass. 0 if memory ran out. */
+int chopper_weighted_set_add_polygons(chopper_weighted_set * set,
+                                      const chopper_polygon_set * polygons);
+
+/** Release what a set allocated and leave an empty set behind. A NULL pointer is fine. */
+void chopper_weighted_set_free(chopper_weighted_set * set);
+
+/** The value of an affine function at a point. */
+double chopper_affine_value(chopper_affine f, double inverse_velocity, double time);
+
+/** The transmission one piece gives a point, whether or not the point is inside it. */
+double chopper_weighted_polygon_weight(const chopper_weighted_polygon * polygon,
+                                       double inverse_velocity, double time);
+
+/** The integral of a piece's transmission over its polygon, s^2/m.
+ *
+ * Exact: the polygon is fanned into triangles and the product of affine factors is a
+ * polynomial in each triangle's barycentric coordinates, integrated term by term. With
+ * no factors it is the polygon's area.
+ */
+double chopper_weighted_polygon_integral(const chopper_weighted_polygon * polygon);
+
+/** The integral of the transmission over a whole set, s^2/m: the area a uniformly drawn
+ * ray budget effectively passes. Never more than the area of the region transmitted with
+ * the same apertures, and equal to the point-beam area for a lone disk.
+ */
+double chopper_weighted_set_integral(const chopper_weighted_set * set);
+
+/** The transmission at a point: the sum over the pieces containing it. */
+double chopper_weighted_set_transmission(const chopper_weighted_set * set,
+                                         double inverse_velocity, double time);
+
+/** Replace a set with what one group of co-located disks passes, weighted.
+ *
+ * See the section note for the rule. A disk parked open, or open for a whole turn, drops
+ * out of the group; one parked shut empties the set.
+ *
+ * @param set The set, replaced in place; left empty and owning nothing on failure
+ * @param count How many disks the group has
+ * @param disks The disks
+ * @return 0 if memory ran out, a polygon needed more vertices than it has room for, or a
+ *         piece would need more than `CHOPPER_WEIGHT_MAX_FACTORS` factors; 1 otherwise
+ */
+int chopper_weighted_set_transmit_group(chopper_weighted_set * set, unsigned count,
+                                        const chopper_parameters * disks);
+
+/** The whole train, weighted, in beam order.
+ *
+ * `groups` gives each disk's group as an index; disks sharing one -- which must be
+ * adjacent -- are treated as co-located, and different groups as independent. NULL
+ * makes every disk its own group.
+ *
+ * @return 0 on failure, as `chopper_weighted_set_transmit_group`, or if a group's disks
+ *         are not adjacent
+ */
+int chopper_weighted_set_transmit_train(chopper_weighted_set * set, unsigned count,
+                                        const chopper_parameters * disks,
+                                        const unsigned * groups);
 
 int chopper_write_mask_to_file(
   const char * directory, const char * filename, const char * extension, const char * path_sep,
