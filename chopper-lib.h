@@ -39,6 +39,14 @@
  *     same calls with a source of no depth. Additive: nothing already described means
  *     anything different.
  *
+ *     In the components rather than the library: `Polygon_ESS_butterfly` and
+ *     `Masked_ESS_butterfly` take that range from their own emission surfaces
+ *     (`emission_depth=1`), and `Polygon_ESS_butterfly` resamples by default
+ *     (`resample=1`). An instrument that left `resample` unset now gets different rays,
+ *     about 1/acceptance times as many reaching its monitors, and the same intensities
+ *     within statistics; one using time focusing, `use_region=0` or a `noise_fraction`
+ *     with it has to set `resample=0`, or INITIALIZE refuses it.
+ *
  * 4.3.0
  *     `chopper_weighted_set` carries how likely a neutron is to get through, not only
  *     whether it can: an edge of a disk with an `aperture` ramps the transmission

@@ -400,6 +400,13 @@ arguments, since each is known to a different component, and are added inside. B
 `Polygon_ESS_butterfly` and `Masked_ESS_butterfly` take the range from their own emission
 surfaces (`emission_depth=1`, the default) and so need 4.4.0.
 
+`Polygon_ESS_butterfly` also resamples by default from 4.4.0 (`resample=1`): it draws every
+ray from inside the transmitted region and multiplies its weight by the region's share of
+the sampled plane, which for BIFROST's primary is about two hundred times the statistics per
+CPU second. Intensities are unchanged within statistics, but the rays are not, and an
+instance that uses time focusing, `use_region=0` or a `noise_fraction` must now set
+`resample=0`.
+
 ## License
 
 BSD 3-Clause; see [LICENSE](LICENSE). Every file McCode redistributes carries an

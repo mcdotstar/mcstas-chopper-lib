@@ -86,14 +86,20 @@
 *
 * <b>What the region is spent on: `resample`</b>
 *
-* By default a ray outside the region is ABSORBed. That is correct -- the discs would have
-* stopped it -- but a train that passes a percent of the plane then spends ninety-nine
-* percent of `ncount` on rays that die where they were born, and the run has the statistics
-* of one a hundredth the size.
+* Absorbing a ray outside the region is correct -- the discs would have stopped it -- but a
+* train that passes a percent of the plane then spends ninety-nine percent of `ncount` on
+* rays that die where they were born, and the run has the statistics of one a hundredth
+* the size.
 *
-* `resample = 1` draws the excluded ray again, from inside the region, instead of throwing
-* it away. This is the same measurement, not an approximation, because the source samples
-* the two coordinates uniformly and independently: `lambda = Lmin + range * rand01()` with
+* So by default, `resample = 1`, the excluded ray is drawn again, from inside the region,
+* instead of being thrown away; on BIFROST's primary that is about two hundred times the
+* statistics per CPU second at the sample. `resample = 0` absorbs it instead, and is what
+* time focusing, `use_region = 0` and a `noise_fraction` need: each of them with
+* `resample = 1` is refused rather than quietly changed, since a component cannot tell a
+* value it was given from its default.
+*
+* Resampling is the same measurement, not an approximation, because the source samples the
+* two coordinates uniformly and independently: `lambda = Lmin + range * rand01()` with
 * `1/v = lambda V2K / 2 pi`, and `t = rand01() * tmax_multiplier * ESS_SOURCE_DURATION`.
 * Restricting a uniform draw to a region and multiplying the weight by that region's share
 * of the whole -- chopper-lib's `acceptance` -- leaves every downstream estimator unbiased.
@@ -164,7 +170,9 @@
 * emission_depth: [1]                 allow for the depth of the moderator surfaces along the beam (1), or emit
 *                                     as though from the component's origin alone (0)
 * use_region: [1]                     use (1) or do not use (0) the transmitted region to limit source emission
-* resample: [1]                       draw (1/v, t) directly from the region, 100% ray emission from source
+* resample: [1]                       draw (1/v, t) directly from the region, 100% ray emission from source (1,
+*                                     the default), or absorb rays outside it (0); 0 is needed with time
+*                                     focusing, use_region=0 or a noise_fraction
 * save_polygons: [1]                  output the transmitted region as {filename}.json
 * verify_acceptance: [1]              count drawn rays and those landing in the region, and report the ratio --
 *                                     the acceptance that resample=1 corrects every ray weight by, measured from
@@ -188,7 +196,7 @@ SETTING PARAMETERS (
   noise_fraction=0.0,
   int emission_depth=1,
   int use_region=1,
-  int resample=0,
+  int resample=1,
   int save_polygons=1,
   int verify_acceptance=1
 )
@@ -436,7 +444,7 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
                         "  Time focusing already does this exactly: the window is a band of "
                         "slope -tfocus_dist in the (1/v, t) plane, the shape of a chopper "
                         "band, and w_tfocus is the compensating weight. Set tfocus_dist, "
-                        "tfocus_time and tfocus_width from the pulse-shaping disc and leave "
+                        "tfocus_time and tfocus_width from the pulse-shaping disc and set "
                         "resample=0.\n", NAME_CURRENT_COMP);
       );
       exit(1);
