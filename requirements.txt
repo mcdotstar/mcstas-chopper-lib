@@ -1,7 +1,5 @@
-# The chopper train tests need niess' `train_from_instrument`, which this pin
-# predates; they skip themselves without it. Move the pin on once niess has it.
-git+https://github.com/mcdotstar/niess.git@c50063d21270784ea633d343825a1ece7775e4db
-chopcal >= 0.5.0  # 0.5.0 dropped Chopper.phase in favour of Chopper.delay
+niess >= 0.14.0  # each disc's knobs are <name>_rotation_speed and <name>_experiment_delay
+chopcal >= 0.9.0  # chopcal.nicos.experiment_delay
 ncrystal >= 4.2.10
 scipp
 gitpython
