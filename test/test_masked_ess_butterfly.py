@@ -5,12 +5,9 @@ from textwrap import dedent
 import pytest
 from pytest import mark
 
-# These tests drive niess' chopper train emission, which is in no niess release yet:
-# `train_from_instrument`, and the `narrow_source_wavelengths` that takes a train
-# positionally, postdate v0.6.0 -- which has `build_train` and a keyword-only
-# `narrow_source_wavelengths` in their place -- and postdate the commit requirements.txt
-# pins besides. Skip the module rather than fail collection on the import, so a checkout
-# with a released niess, or with none at all, still collects and runs the rest.
+# These tests drive niess' chopper train emission and set the discs through the ESS
+# controller knobs niess 0.14.0 declares. Skip the module, rather than fail collection on
+# the import, where the installed niess predates `train_from_instrument`.
 try:
     from niess.chopcalc import train_from_instrument  # noqa: F401
 except ImportError:
@@ -184,8 +181,9 @@ def bifrost_primary(masked: bool = False):
     return assembler.instrument
 
 
-def bifrost_chopper_params(e_max, t_psc):
+def bifrost_chopper_params(e_min, t_psc):
     from chopcal import bifrost
+    from chopcal.nicos import experiment_delay
     names = {
         'ps1': 'pulse_shaping_chopper_1',
         'ps2': 'pulse_shaping_chopper_2',
@@ -194,12 +192,14 @@ def bifrost_chopper_params(e_max, t_psc):
         'bw1': 'bandwidth_chopper_1',
         'bw2': 'bandwidth_chopper_2',
     }
-    pars = bifrost(e_max, 0, t_psc)
-    # chopcal gives the delay in seconds and the speed in Hz; niess declares each disc's
-    # knobs as `<name>_delay` in ns and `<name>_rotation_speed` in Hz.
-    vals = [f'{v}_delay={pars[x].delay * 1e9}' for x, v in names.items()]
+    pars = bifrost(energy_min=e_min, shaping_time=t_psc)
+    # niess gives each disc the knobs an ESS chopper controller has: `<name>_rotation_speed`
+    # in Hz, signed as chopcal and NeXus sign it, and `<name>_experiment_delay` in ns, which
+    # puts the centre of the opening on the beam that long after the instrument's
+    # `pulse_delay` -- held at zero here, so chopcal's own delay folded into one turn.
+    vals = [f'{v}_experiment_delay={experiment_delay(pars[x]) * 1e9}' for x, v in names.items()]
     vals += [f'{v}_rotation_speed={pars[x].speed}' for x, v in names.items()]
-    return ' '.join(vals)
+    return ' '.join(vals) + ' pulse_delay=0'
 
 
 def test_bifrost_ess_source_runs():
@@ -271,7 +271,7 @@ def make_parser():
     p.add_argument('-m','--masked', action='store_true', help='Use masked ESS source')
     p.add_argument('-u','--unmasked', action='store_true', help='Use unmasked ESS source')
     p.add_argument('-n', '--count', type=int, default=1000, help='Number of neutrons to simulate')
-    p.add_argument('--e_max', type=int, default=5, help='Maximum incident energy in meV')
+    p.add_argument('--e_min', type=float, default=5, help='Lowest incident energy in meV')
     p.add_argument('--t_psc', type=float, default=0.001, help='PSC opening time in sec')
     p.add_argument('--lambda_min', type=float, default=0.1, help='Minimum wavelength to simulate')
     p.add_argument('--lambda_max', type=float, default=10., help='Maximum wavelength to simulate')
@@ -279,9 +279,9 @@ def make_parser():
     return p
 
 
-def main(masked, count, e_max, t_psc, source_lambda_min, source_lambda_max, directory):
+def main(masked, count, e_min, t_psc, source_lambda_min, source_lambda_max, directory):
     cmds = f'-n {count} source_lambda_min={source_lambda_min} source_lambda_max={source_lambda_max} '
-    cmds += bifrost_chopper_params(e_max, t_psc)
+    cmds += bifrost_chopper_params(e_min, t_psc)
     print(cmds)
     instr = bifrost_primary(masked=masked)
     time_compile_and_run(instr, cmds, run=True, directory=directory)
@@ -289,6 +289,6 @@ def main(masked, count, e_max, t_psc, source_lambda_min, source_lambda_max, dire
 
 if __name__ == '__main__':
     args = make_parser().parse_args()
-    main(masked=args.masked and not args.unmasked, count=args.count, e_max=args.e_max, t_psc=args.t_psc,
+    main(masked=args.masked and not args.unmasked, count=args.count, e_min=args.e_min, t_psc=args.t_psc,
          source_lambda_min=args.lambda_min, source_lambda_max=args.lambda_max, directory=args.output)
 
