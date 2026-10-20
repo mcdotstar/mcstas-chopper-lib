@@ -46,14 +46,14 @@ static chopper_polygon_set bifrost_source(void) {
  * the two is evidence rather than a tautology. */
 static int neutron_passes(const chopper_parameters * choppers, const unsigned count,
                           const double inverse_velocity, const double time,
-                          const double path_spread) {
+                          const double shorter, const double longer) {
   for (unsigned i = 0; i < count; ++i) {
     const chopper_parameters c = choppers[i];
     if (c.speed == 0.0) continue;
     const double tau = 1.0 / fabs(c.speed);
     const double aperture = c.aperture > 0 ? c.aperture / 2.0 / 360.0 / fabs(c.speed) : 0.0;
-    const double early = time + c.path * inverse_velocity;
-    const double late = time + (c.path + path_spread) * inverse_velocity;
+    const double early = time + (c.path - shorter) * inverse_velocity;
+    const double late = time + (c.path + longer) * inverse_velocity;
     int through = 0;
     for (unsigned w = 0; w + 1 < c.edge_count && !through; w += 2) {
       double lo = c.delay + (c.beam - c.edges[w]) / 360.0 / c.speed;
@@ -311,7 +311,7 @@ int main(void) {
       }
       a /= (double) set.polygon[i].count;
       t /= (double) set.polygon[i].count;
-      CHECK(neutron_passes(bifrost, 6, a, t, 0.0));
+      CHECK(neutron_passes(bifrost, 6, a, t, 0.0, 0.0));
     }
     chopper_polygon_set_free(&set);
   }
@@ -329,7 +329,7 @@ int main(void) {
       const double a = SOURCE_INVERSE_VELOCITY_MIN
                      + SOURCE_INVERSE_VELOCITY_RANGE * radical_inverse(i, 2);
       const double t = SOURCE_TIME_MIN + SOURCE_TIME_RANGE * radical_inverse(i, 3);
-      if (neutron_passes(bifrost, 6, a, t, 0.0)) ++through;
+      if (neutron_passes(bifrost, 6, a, t, 0.0, 0.0)) ++through;
     }
     const double counted = (double) through / (double) samples;
     /* A quasi-random sequence converges faster than 1/sqrt(N), but the boundary is a
@@ -422,7 +422,7 @@ int main(void) {
         }
         a /= (double) set.polygon[i].count;
         t /= (double) set.polygon[i].count;
-        CHECK(neutron_passes(bifrost, 6, a, t, fraction * 0.0));
+        CHECK(neutron_passes(bifrost, 6, a, t, 0.0, fraction * 0.0));
       }
       chopper_polygon_set_free(&set);
     }
@@ -436,6 +436,95 @@ int main(void) {
     CHECK_EQUAL_INT(chopper_polygon_set_transmit_train(&set, 6, bifrost, spreads), 0);
     CHECK_EQUAL_INT(set.count, 0);
     chopper_polygon_set_free(&set);
+  }
+
+  TEST("a source of no depth is the source the plain calls assume");
+  {
+    chopper_polygon_set plain = bifrost_source(), deep = bifrost_source();
+    CHECK_EQUAL_INT(chopper_polygon_set_transmit_train(&plain, 6, bifrost, NULL), 1);
+    CHECK_EQUAL_INT(chopper_polygon_set_transmit_train_depth(&deep, 6, bifrost, 0.0, 0.0, NULL), 1);
+    CHECK_EQUAL_INT(deep.count, plain.count);
+    CHECK_CLOSE(chopper_polygon_set_area(&deep), chopper_polygon_set_area(&plain), 0.0);
+    chopper_polygon_set_free(&plain);
+    chopper_polygon_set_free(&deep);
+  }
+
+  TEST("a source with depth passes what some point of it would, and nothing more");
+  {
+    /* ESS_butterfly's surfaces reach a few centimetres either side of its origin. The
+     * part ahead shortens every path, which no guide spread can stand in for. */
+    const double z_min = -0.03, z_max = 0.02, spread = 1.0e-4;
+    double spreads[6];
+    for (unsigned i = 0; i < 6; ++i) spreads[i] = spread * bifrost[i].path;
+    chopper_polygon_set plain = bifrost_source(), deep = bifrost_source();
+    chopper_polygon_set_transmit_train(&plain, 6, bifrost, spreads);
+    CHECK_EQUAL_INT(chopper_polygon_set_transmit_train_depth(&deep, 6, bifrost, z_min, z_max,
+                                                             spreads), 1);
+    CHECK(chopper_polygon_set_area(&deep) > chopper_polygon_set_area(&plain));
+
+    unsigned disagreements = 0, only_shorter = 0, only_deep = 0;
+    for (unsigned i = 1; i <= 20000; ++i) {
+      const double a = SOURCE_INVERSE_VELOCITY_MIN
+                     + SOURCE_INVERSE_VELOCITY_RANGE * radical_inverse(i, 2);
+      const double t = SOURCE_TIME_MIN + SOURCE_TIME_RANGE * radical_inverse(i, 3);
+      const int by_polygon = chopper_polygon_set_contains(&deep, a, t);
+      /* Worked per disk, the spread each one's own, against the combined range. */
+      int by_disks = 1;
+      for (unsigned d = 0; d < 6 && by_disks; ++d) {
+        by_disks = neutron_passes(&bifrost[d], 1, a, t, z_max, spreads[d] - z_min);
+      }
+      if (by_polygon != by_disks) ++disagreements;
+      if (by_polygon && !chopper_polygon_set_contains(&plain, a, t)) {
+        ++only_deep;
+        /* Does it need the shorter paths? Then the spread alone could never pass it. */
+        int longer_only = 1;
+        for (unsigned d = 0; d < 6 && longer_only; ++d) {
+          longer_only = neutron_passes(&bifrost[d], 1, a, t, 0.0, spreads[d] - z_min);
+        }
+        if (!longer_only) ++only_shorter;
+      }
+    }
+    CHECK_EQUAL_INT(disagreements, 0);
+    CHECK(only_deep > 0);
+    CHECK(only_shorter > 0);
+    chopper_polygon_set_free(&plain);
+    chopper_polygon_set_free(&deep);
+  }
+
+  TEST("a source's limits out of order, or reaching a disk, are refused");
+  {
+    chopper_polygon_set set = bifrost_source();
+    CHECK_EQUAL_INT(chopper_polygon_set_transmit_depth(&set, bifrost[0], 0.02, -0.02, 0.0), 0);
+    CHECK_EQUAL_INT(set.count, 0);
+    chopper_polygon_set_free(&set);
+    set = bifrost_source();
+    CHECK_EQUAL_INT(chopper_polygon_set_transmit_depth(&set, bifrost[0], 0.0,
+                                                       bifrost[0].path + 0.1, 0.0), 0);
+    CHECK_EQUAL_INT(set.count, 0);
+    chopper_polygon_set_free(&set);
+  }
+
+  TEST("the mask of a source with depth keeps at least the plain mask, and more");
+  {
+    enum { NV = 400, NT = 300 };
+    double ivs[NV + 1], times[NT + 1];
+    for (unsigned i = 0; i <= NV; ++i)
+      ivs[i] = SOURCE_INVERSE_VELOCITY_MIN + SOURCE_INVERSE_VELOCITY_RANGE * i / NV;
+    for (unsigned i = 0; i <= NT; ++i)
+      times[i] = SOURCE_TIME_MIN + SOURCE_TIME_RANGE * i / NT;
+    static int plain[NV * NT], same[NV * NT], deep[NV * NT];
+    const unsigned n_plain = chopper_inverse_velocity_time_mask(
+        plain, NV, NT, ivs, NV + 1, times, NT + 1, bifrost, 6, 0);
+    const unsigned n_same = chopper_inverse_velocity_time_mask_depth(
+        same, NV, NT, ivs, NV + 1, times, NT + 1, bifrost, 6, 0, 0.0, 0.0);
+    const unsigned n_deep = chopper_inverse_velocity_time_mask_depth(
+        deep, NV, NT, ivs, NV + 1, times, NT + 1, bifrost, 6, 0, -0.03, 0.02);
+    CHECK_EQUAL_INT(n_same, n_plain);
+    CHECK_EQUAL_INT(memcmp(same, plain, sizeof(plain)), 0);
+    CHECK(n_deep > n_plain);
+    unsigned lost = 0;
+    for (unsigned i = 0; i < NV * NT; ++i) if (plain[i] && !deep[i]) ++lost;
+    CHECK_EQUAL_INT(lost, 0);
   }
 
   TEST("the sampler draws inside the region, and its acceptance is the area ratio");
@@ -453,7 +542,7 @@ int main(void) {
       double a = 0, t = 0;
       chopper_polygon_sampler_draw(&sampler, radical_inverse(i, 2), radical_inverse(i, 3),
                                    radical_inverse(i, 5), &a, &t);
-      if (!neutron_passes(bifrost, 6, a, t, 0.0)) ++outside;
+      if (!neutron_passes(bifrost, 6, a, t, 0.0, 0.0)) ++outside;
     }
     CHECK_EQUAL_INT(outside, 0);
 
@@ -537,7 +626,7 @@ int main(void) {
                      + SOURCE_INVERSE_VELOCITY_RANGE * radical_inverse(i, 2);
       const double t = SOURCE_TIME_MIN + SOURCE_TIME_RANGE * radical_inverse(i, 3);
       const int by_polygon = chopper_polygon_set_contains(&set, a, t);
-      const int by_disks = neutron_passes(bifrost, 6, a, t, 0.0);
+      const int by_disks = neutron_passes(bifrost, 6, a, t, 0.0, 0.0);
       if (by_polygon) ++inside;
       if (by_polygon != by_disks) ++disagreements;
     }

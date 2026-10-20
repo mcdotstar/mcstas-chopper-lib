@@ -28,6 +28,25 @@
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.4.0
+ *     A source with depth. `chopper_polygon_set_transmit_depth`,
+ *     `chopper_polygon_set_transmit_train_depth` and `chopper_inverse_velocity_time_mask_depth`
+ *     take the range of positions along the beam a source emits from, `[emission_z_min,
+ *     emission_z_max]` about the point every `path` is measured from, and reach each disk
+ *     over `[path - emission_z_max, path - emission_z_min + path_spread]`. The guide's
+ *     `path_spread` stays a separate argument: one is the source's shape and the other the
+ *     guide's, and only their sum reaches the disk. The functions without `_depth` are the
+ *     same calls with a source of no depth. Additive: nothing already described means
+ *     anything different.
+ *
+ *     In the components rather than the library: `Polygon_ESS_butterfly` and
+ *     `Masked_ESS_butterfly` take that range from their own emission surfaces
+ *     (`emission_depth=1`), and `Polygon_ESS_butterfly` resamples by default
+ *     (`resample=1`). An instrument that left `resample` unset now gets different rays,
+ *     about 1/acceptance times as many reaching its monitors, and the same intensities
+ *     within statistics; one using time focusing, `use_region=0` or a `noise_fraction`
+ *     with it has to set `resample=0`, or INITIALIZE refuses it.
+ *
  * 4.3.0
  *     `chopper_weighted_set` carries how likely a neutron is to get through, not only
  *     whether it can: an edge of a disk with an `aperture` ramps the transmission
@@ -122,7 +141,7 @@
  *     Unversioned releases, taking `phase`.
  */
 #define CHOPPER_LIB_VERSION_MAJOR 4
-#define CHOPPER_LIB_VERSION_MINOR 3
+#define CHOPPER_LIB_VERSION_MINOR 4
 #define CHOPPER_LIB_VERSION_PATCH 0
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
 #define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
@@ -360,6 +379,27 @@ unsigned chopper_inverse_velocity_time_mask(
   const double * times, unsigned time_count,
   const chopper_parameters * choppers, unsigned chopper_count,
   int grow_mask
+  );
+
+/** `chopper_inverse_velocity_time_mask` for a source with depth.
+ *
+ * A neutron emitted from `z` along the beam reaches a disk `path` metres from the source's
+ * origin after `path - z`, so a source emitting over `[emission_z_min, emission_z_max]`
+ * reaches it over `[path - emission_z_max, path - emission_z_min]`, and a bin is kept if
+ * any of those paths could carry it through. Equal limits of zero are the plain mask.
+ *
+ * @param emission_z_min [in] The rearmost point the source emits from, m, downstream positive
+ * @param emission_z_max [in] The foremost point the source emits from, m; not less than
+ *                            `emission_z_min`, and not beyond any disk
+ * @return As `chopper_inverse_velocity_time_mask`; exits if the limits are out of order or
+ *         reach a disk, as it does for mismatched dimensions
+ */
+unsigned chopper_inverse_velocity_time_mask_depth(
+  int * mask, unsigned mask_inverse_velocity_count, unsigned mask_time_count,
+  const double * inverse_velocities, unsigned inverse_velocity_count,
+  const double * times, unsigned time_count,
+  const chopper_parameters * choppers, unsigned chopper_count,
+  int grow_mask, double emission_z_min, double emission_z_max
   );
 
 /** \brief Calculate the relative probability in the unmasked regions of a signal
@@ -728,6 +768,30 @@ double chopper_polygon_set_area(const chopper_polygon_set * set);
 int chopper_polygon_set_transmit(chopper_polygon_set * set, chopper_parameters chopper,
                                  double path_spread);
 
+/** `chopper_polygon_set_transmit` for a source with depth.
+ *
+ * A moderator emits from surfaces, not from the point its flight paths are measured from,
+ * and a neutron leaving a surface `z` metres downstream of that point reaches the disk
+ * after `path - z`. `[emission_z_min, emission_z_max]` is the range of `z` the source emits
+ * over, which only the source knows; `path_spread` is the guide's extra length, which only
+ * the guide knows. The two are kept apart here and combined: the disk is reached over
+ *
+ *     [path - emission_z_max, path - emission_z_min + path_spread]
+ *
+ * which is a wedge like the spread's alone, opened on both sides. A source ahead of its
+ * origin gives *shorter* paths, which no `path_spread` can describe. The turn-overlap
+ * refusal applies to the whole width.
+ *
+ * @param emission_z_min The rearmost point the source emits from, m, downstream positive
+ * @param emission_z_max The foremost, m; not less than `emission_z_min`, and not beyond the disk
+ * @param path_spread Extra path the guide allows, m; 0 for a straight line
+ * @return 0 for anything `chopper_polygon_set_transmit` refuses, or limits out of order or
+ *         reaching the disk; 1 otherwise
+ */
+int chopper_polygon_set_transmit_depth(chopper_polygon_set * set, chopper_parameters chopper,
+                                       double emission_z_min, double emission_z_max,
+                                       double path_spread);
+
 /** The whole train, in beam order, stopping early once nothing is left.
  *
  * The result is the exact transmitted region: `chopper_polygon_set_area` over the area of
@@ -743,6 +807,18 @@ int chopper_polygon_set_transmit(chopper_polygon_set * set, chopper_parameters c
 int chopper_polygon_set_transmit_train(chopper_polygon_set * set, unsigned count,
                                        const chopper_parameters * choppers,
                                        const double * path_spreads);
+
+/** The whole train from a source with depth; see `chopper_polygon_set_transmit_depth`.
+ *
+ * The emission range is the source's, so one pair serves every disk; the guide's spread
+ * is still one per disk, since it accumulates along the way.
+ *
+ * @return 0 on failure, as `chopper_polygon_set_transmit_depth`
+ */
+int chopper_polygon_set_transmit_train_depth(chopper_polygon_set * set, unsigned count,
+                                             const chopper_parameters * choppers,
+                                             double emission_z_min, double emission_z_max,
+                                             const double * path_spreads);
 
 /** The inverse velocity bands a set covers, sorted and merged.
  *

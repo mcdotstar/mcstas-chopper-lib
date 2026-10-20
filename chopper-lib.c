@@ -413,7 +413,25 @@ unsigned chopper_inverse_velocity_time_mask(
   const chopper_parameters *choppers, const unsigned chopper_count,
   const int grow_mask
   ) {
+  return chopper_inverse_velocity_time_mask_depth(
+    mask, mask_inverse_velocity_count, mask_time_count, inverse_velocities,
+    inverse_velocity_count, times, time_count, choppers, chopper_count, grow_mask, 0.0, 0.0);
+}
+
+unsigned chopper_inverse_velocity_time_mask_depth(
+  int *mask, const unsigned mask_inverse_velocity_count, const unsigned mask_time_count,
+  const double *inverse_velocities, const unsigned inverse_velocity_count,
+  const double *times, const unsigned time_count,
+  const chopper_parameters *choppers, const unsigned chopper_count,
+  const int grow_mask, const double emission_z_min, const double emission_z_max
+  ) {
   unsigned allowed_bins = 0;
+
+  if (!(emission_z_min <= emission_z_max)) {
+    printf("A source emitting from %g m to %g m along the beam has them out of order\n",
+           emission_z_min, emission_z_max);
+    exit(-1);
+  }
 
   if (mask_inverse_velocity_count != inverse_velocity_count - 1 || mask_time_count != time_count - 1) {
     printf("Mask dimensions do not match the provided inverse velocity and time arrays\n");
@@ -456,9 +474,18 @@ unsigned chopper_inverse_velocity_time_mask(
     }
     const double tau = 1.0 / fabs(choppers[ci].speed);
     const double aperture = chopper_aperture_time(choppers[ci]);
+    // A source with depth reaches the disk over a range of paths: the nearest bounds the
+    // earliest arrival and the farthest the latest.
+    const double shortest_path = choppers[ci].path - emission_z_max;
+    const double longest_path = choppers[ci].path - emission_z_min;
+    if (!(shortest_path >= 0.0)) {
+      printf("A source emitting from up to %g m along the beam reaches past chopper %u, "
+             "%g m away\n", emission_z_max, ci, choppers[ci].path);
+      exit(-1);
+    }
     const range time_range = {
-      .minimum = times[0] + choppers[ci].path * inverse_velocities[0],
-      .maximum = times[time_count - 1] + choppers[ci].path * inverse_velocities[inverse_velocity_count - 1]
+      .minimum = times[0] + shortest_path * inverse_velocities[0],
+      .maximum = times[time_count - 1] + longest_path * inverse_velocities[inverse_velocity_count - 1]
     };
     const int_range rotations = chopper_rotation_limits(choppers[ci], time_range);
     if (rotations.maximum < rotations.minimum) continue; // No possible rotations
@@ -485,8 +512,8 @@ unsigned chopper_inverse_velocity_time_mask(
       for (unsigned vi = 0; vi < mask_inverse_velocity_count; ++ vi) {
         if (time_edges[ti * mask_inverse_velocity_count + vi] == 1) {
           const range edge= {
-            .minimum = times[ti] + choppers[ci].path * inverse_velocities[vi],
-            .maximum = times[ti] + choppers[ci].path * inverse_velocities[vi + 1]
+            .minimum = times[ti] + shortest_path * inverse_velocities[vi],
+            .maximum = times[ti] + longest_path * inverse_velocities[vi + 1]
           };
           if (range_intersects_ranges(edge, allowed_times) == 0) {
             time_edges[ti * mask_inverse_velocity_count + vi] = 0;
@@ -498,8 +525,8 @@ unsigned chopper_inverse_velocity_time_mask(
       for (unsigned ti = 0; ti < mask_time_count; ++ti) {
         if (inverse_velocity_edges[vi * mask_time_count + ti] == 1) {
           const range edge = {
-            .minimum = times[ti] + choppers[ci].path * inverse_velocities[vi],
-            .maximum = times[ti + 1] + choppers[ci].path * inverse_velocities[vi]
+            .minimum = times[ti] + shortest_path * inverse_velocities[vi],
+            .maximum = times[ti + 1] + longest_path * inverse_velocities[vi]
           };
           if (range_intersects_ranges(edge, allowed_times) == 0) {
             inverse_velocity_edges[vi * mask_time_count + ti] = 0;
@@ -882,6 +909,13 @@ static void chopper_opening_times(const chopper_parameters chopper, const unsign
 
 int chopper_polygon_set_transmit(chopper_polygon_set * set, const chopper_parameters chopper,
                                  const double path_spread) {
+  return chopper_polygon_set_transmit_depth(set, chopper, 0.0, 0.0, path_spread);
+}
+
+int chopper_polygon_set_transmit_depth(chopper_polygon_set * set,
+                                       const chopper_parameters chopper,
+                                       const double emission_z_min, const double emission_z_max,
+                                       const double path_spread) {
   if (set == NULL) return 0;
   if (chopper.edge_count < 2 || chopper.edges == NULL) {
     /* No openings at all is a beam stop, the same as one parked shut. */
@@ -900,15 +934,25 @@ int chopper_polygon_set_transmit(chopper_polygon_set * set, const chopper_parame
     chopper_polygon_set_free(set);
     return 0;
   }
+  if (!(emission_z_min <= emission_z_max) || !(emission_z_max <= chopper.path)) {
+    printf("A source emitting from %g m to %g m along the beam has to have them in order "
+           "and not beyond the chopper %g m away\n", emission_z_min, emission_z_max,
+           chopper.path);
+    chopper_polygon_set_free(set);
+    return 0;
+  }
 
   const double tau = 1.0 / fabs(chopper.speed);
   const unsigned opening_count = chopper.edge_count / 2;
-  const double shortest_path = chopper.path;
-  const double longest_path = chopper.path + path_spread;
+  /* The source's depth and the guide's spread are separate lengths; only their sum
+   * reaches the disk. */
+  const double shortest_path = chopper.path - emission_z_max;
+  const double longest_path = chopper.path - emission_z_min + path_spread;
+  const double path_width = longest_path - shortest_path;
 
   /* A spread wide enough to reach from one turn into the next stops the pieces being
    * disjoint, and then areas double-count. Test it against the slowest neutron present. */
-  if (path_spread > 0.0 && set->count) {
+  if (path_width > 0.0 && set->count) {
     double inverse_velocity_maximum = 0.0;
     for (unsigned i = 0; i < set->count; ++i) {
       double high = 0.0;
@@ -919,11 +963,11 @@ int chopper_polygon_set_transmit(chopper_polygon_set * set, const chopper_parame
       double lo = 0, hi = 0;
       chopper_opening_times(chopper, w, &lo, &hi);
       if (hi - lo >= tau) continue;  /* never shut, so nothing to overlap into */
-      if (path_spread * inverse_velocity_maximum >= tau - (hi - lo)) {
-        printf("A path spread of %g m reaches from one turn of this chopper into the next "
+      if (path_width * inverse_velocity_maximum >= tau - (hi - lo)) {
+        printf("Paths %g m apart reach from one turn of this chopper into the next "
                "for an inverse velocity of %g s/m; the transmitted pieces would overlap "
-               "and their areas would count twice. Narrow the inverse velocity range or "
-               "the spread.\n", path_spread, inverse_velocity_maximum);
+               "and their areas would count twice. Narrow the inverse velocity range, the "
+               "spread or the source's depth.\n", path_width, inverse_velocity_maximum);
         chopper_polygon_set_free(set);
         return 0;
       }
@@ -984,10 +1028,18 @@ int chopper_polygon_set_transmit(chopper_polygon_set * set, const chopper_parame
 int chopper_polygon_set_transmit_train(chopper_polygon_set * set, const unsigned count,
                                        const chopper_parameters * choppers,
                                        const double * path_spreads) {
+  return chopper_polygon_set_transmit_train_depth(set, count, choppers, 0.0, 0.0, path_spreads);
+}
+
+int chopper_polygon_set_transmit_train_depth(chopper_polygon_set * set, const unsigned count,
+                                             const chopper_parameters * choppers,
+                                             const double emission_z_min,
+                                             const double emission_z_max,
+                                             const double * path_spreads) {
   if (set == NULL || (count && choppers == NULL)) return 0;
   for (unsigned i = 0; i < count && set->count; ++i) {
-    if (!chopper_polygon_set_transmit(set, choppers[i],
-                                      path_spreads ? path_spreads[i] : 0.0)) return 0;
+    if (!chopper_polygon_set_transmit_depth(set, choppers[i], emission_z_min, emission_z_max,
+                                            path_spreads ? path_spreads[i] : 0.0)) return 0;
   }
   return 1;
 }
