@@ -28,6 +28,15 @@
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.4.1
+ *     A parked disk is open if any of the beam goes through an opening, not only its
+ *     centre: `chopper_parked_is_open` reads the disk's `aperture`. It ignored it, so a
+ *     disk parked with the beam half over an edge was called shut when its centre was on
+ *     the solid part, and every function using it emptied its answer -- and
+ *     `Polygon_ESS_butterfly` refused to run -- at angles where the real disk passes part
+ *     of the beam. That is half of every edge of a park-angle scan. Nothing changes for a
+ *     point beam (`aperture` 0), or for a beam wholly on an opening or wholly on the disk.
+ *
  * 4.4.0
  *     A source with depth. `chopper_polygon_set_transmit_depth`,
  *     `chopper_polygon_set_transmit_train_depth` and `chopper_inverse_velocity_time_mask_depth`
@@ -142,7 +151,7 @@
  */
 #define CHOPPER_LIB_VERSION_MAJOR 4
 #define CHOPPER_LIB_VERSION_MINOR 4
-#define CHOPPER_LIB_VERSION_PATCH 0
+#define CHOPPER_LIB_VERSION_PATCH 1
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
 #define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
                            + CHOPPER_LIB_VERSION_MINOR * 100 \
@@ -292,9 +301,11 @@ typedef struct chopper_parameters_struct chopper_parameters;
 /** Whether a disk that is not turning stands open on the beam
  *
  * A parked disk is open or shut for good: with no speed there is no period to recur on
- * and no delay to apply, so either `beam` is inside one of the `edges` pairs or it is on
- * the solid part of the disk. Angles fold, so an opening written across the mark --
- * `{350, 370}` -- and a negative `beam` both work.
+ * and no delay to apply, so either some of the beam -- `aperture` degrees centred on
+ * `beam` -- goes through one of the `edges` pairs, or all of it meets the solid part of
+ * the disk. A disk partly open is open, as the windows of a turning disk are a support
+ * too; the ray tracing decides how much of the beam gets through. Angles fold, so an
+ * opening written across the mark -- `{350, 370}` -- and a negative `beam` both work.
  *
  * The window and the mask functions leave a disk parked open out of their calculation,
  * because a disk with no period constrains no inverse velocity. One parked shut is a
@@ -305,8 +316,8 @@ typedef struct chopper_parameters_struct chopper_parameters;
  *
  * @param chopper The disk to test; its `speed` is not read, since a turning disk stands
  *                open on the beam once a period whatever its angles are
- * @return 1 if the beam crosses an opening, 0 if it crosses the disk body or the disk has
- *         no openings at all
+ * @return 1 if any of the beam crosses an opening, 0 if all of it crosses the disk body
+ *         or the disk has no openings at all
  */
 int chopper_parked_is_open(chopper_parameters chopper);
 

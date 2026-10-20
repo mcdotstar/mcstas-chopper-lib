@@ -212,20 +212,25 @@ static double chopper_aperture_time(const chopper_parameters chopper) {
 
 /** Whether a disk that is not turning stands open on the beam.
  *
- * A parked disk is open or shut for good. The beam crosses it at `beam`, the openings
- * span `edges` in the same frame, and with no speed there is no period and no delay to
- * apply: either that angle is inside an opening or it is on the solid part of the disk.
- * Which one decides whether the disk drops out of a calculation or empties it.
+ * A parked disk is open or shut for good. The beam crosses it over `aperture` degrees
+ * centred on `beam`, the openings span `edges` in the same frame, and with no speed there
+ * is no period and no delay to apply: either some of that beam goes through an opening or
+ * all of it meets the solid part of the disk. Which one decides whether the disk drops out
+ * of a calculation or empties it. A disk only partly open is open: like the windows of a
+ * turning disk, this is a support, and what part of the beam gets through is for the ray
+ * tracing to say.
  */
 int chopper_parked_is_open(const chopper_parameters chopper) {
   if (chopper.edge_count < 2 || chopper.edges == NULL) return 0;
+  const double half = chopper.aperture > 0 ? chopper.aperture / 2.0 : 0.0;
   for (unsigned i = 0; i + 1 < chopper.edge_count; i += 2) {
     const double width = chopper.edges[i + 1] - chopper.edges[i];
     // measured from this opening's first edge, so an opening written across the mark --
     // {350, 370} -- needs no special case, and neither does a negative `beam`
     double from_edge = fmod(chopper.beam - chopper.edges[i], 360.0);
     if (from_edge < 0) from_edge += 360.0;
-    if (from_edge < width) return 1;
+    // the beam's far side reaches past the first edge, or its near side short of the last
+    if (from_edge < width + half || from_edge > 360.0 - half) return 1;
   }
   return 0;
 }

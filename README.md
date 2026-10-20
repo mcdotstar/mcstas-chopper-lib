@@ -265,8 +265,11 @@ openings about `delay`. This is invisible for an opening symmetric about the mar
 matters for every other one.
 
 A disk with a `speed` of zero is parked, and is open or shut for good: with no period to
-recur on and no delay to apply, all that decides it is whether `beam` falls inside one of
-the `edges` pairs. `chopper_parked_is_open` answers that.
+recur on and no delay to apply, all that decides it is whether any of the beam -- `aperture`
+degrees centred on `beam` -- falls inside one of the `edges` pairs. `chopper_parked_is_open`
+answers that. A disk the beam is only partly through is open, so that a park-angle scan sees
+the edges ramp as the real disk does; before 4.4.1 only the beam's centre was asked about,
+and a disk half over an edge counted as shut whenever that centre was on the solid part.
 
 A disk parked open constrains nothing -- it has no period, so it passes every inverse
 velocity -- and the window and mask functions step over it. A disk parked shut is a beam
