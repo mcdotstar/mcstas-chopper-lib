@@ -278,6 +278,24 @@ int main(void) {
     chopper_polygon_set_free(&set);
   }
 
+  TEST("a disk parked with part of the beam on an opening constrains nothing");
+  {
+    static double edges[2] = {-10.0, 10.0};
+    /* the beam's centre a degree past the closing edge, its 4-degree width reaching back */
+    chopper_parameters parked = {0.0, 0.0, 11.0, 2, edges, 1.0, 4.0};
+    chopper_polygon_set set = chopper_polygon_set_empty();
+    const chopper_polygon source = chopper_polygon_rectangle(1.0e-4, 1.0e-3, 0.0, 3.0e-3);
+    chopper_polygon_set_add(&set, &source);
+    const double before = chopper_polygon_set_area(&set);
+    CHECK_EQUAL_INT(chopper_polygon_set_transmit(&set, parked, 0.0), 1);
+    CHECK_CLOSE(chopper_polygon_set_area(&set), before, 0.0);
+
+    parked.beam = 13.0;                        /* now all of the beam is on the body */
+    CHECK_EQUAL_INT(chopper_polygon_set_transmit(&set, parked, 0.0), 1);
+    CHECK_EQUAL_INT(set.count, 0);
+    chopper_polygon_set_free(&set);
+  }
+
   TEST("a disk open for a whole turn constrains nothing");
   {
     static double edges[2] = {-180.0, 180.0};

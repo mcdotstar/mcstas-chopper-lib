@@ -575,6 +575,57 @@ static void test_a_parked_disk_is_open_only_when_the_beam_is_in_an_opening(void)
   CHECK_EQUAL_INT(chopper_parked_is_open(no_openings), 0);
 }
 
+/* A parked disk the beam is only partly through is open.
+ *
+ * The beam is `aperture` degrees wide on the disk, so as a park-angle scan turns an
+ * opening across it the disk passes part of the beam for half an aperture either side of
+ * each edge. A disk asked about at the beam's centre alone counted as shut over the half of
+ * that ramp where the centre is on the solid part, and a source narrowed to the train then
+ * refused to emit at angles where the real disk passes neutrons.
+ */
+static void test_a_parked_disk_is_open_while_any_of_the_beam_is_on_an_opening(void) {
+  TEST("a parked disk stands open while any of the beam crosses one of its openings");
+  double edges[4] = {0.0, 10.0, 100.0, 104.0};
+  chopper_parameters disk = {
+    .speed = 0.0, .delay = DELAY, .beam = 0.0, .edge_count = 4, .edges = edges, .path = PATH,
+    .aperture = 4.0};
+
+  disk.beam = 11.0;  /* centre on the body, the beam reaching back to 9 degrees */
+  CHECK_EQUAL_INT(chopper_parked_is_open(disk), 1);
+  disk.beam = 12.5;  /* all of it, 10.5 to 14.5, on the body */
+  CHECK_EQUAL_INT(chopper_parked_is_open(disk), 0);
+  disk.beam = -1.5;  /* reaching across the mark into the first opening */
+  CHECK_EQUAL_INT(chopper_parked_is_open(disk), 1);
+  disk.beam = 357.5; /* 355.5 to 359.5, short of it */
+  CHECK_EQUAL_INT(chopper_parked_is_open(disk), 0);
+  disk.beam = 98.5;  /* the second opening, from below */
+  CHECK_EQUAL_INT(chopper_parked_is_open(disk), 1);
+  disk.beam = 50.0;
+  CHECK_EQUAL_INT(chopper_parked_is_open(disk), 0);
+
+  /* a point beam asks only about its centre, as before */
+  disk.aperture = 0.0;
+  disk.beam = 11.0;
+  CHECK_EQUAL_INT(chopper_parked_is_open(disk), 0);
+
+  /* scanned a degree at a time, offset from the edges: open exactly where some point of
+   * the beam is in an opening, asked one point at a time */
+  disk.aperture = 4.0;
+  int disagreements = 0;
+  for (int k = 0; k < 720; ++k) {
+    disk.beam = -180.0 + 0.5 * k + 0.13;
+    int any = 0;
+    for (int j = 1; j < 400 && !any; ++j) {
+      chopper_parameters point = disk;
+      point.aperture = 0.0;
+      point.beam = disk.beam - disk.aperture / 2.0 + disk.aperture * j / 400.0;
+      any = chopper_parked_is_open(point);
+    }
+    disagreements += any != chopper_parked_is_open(disk);
+  }
+  CHECK_EQUAL_INT(disagreements, 0);
+}
+
 /* A disk parked shut empties the answer, and says which disk did it.
  *
  * It is a beam stop: nothing gets past it at any time, so the train admits no inverse
@@ -846,6 +897,7 @@ int main(void) {
   test_a_train_keeps_only_the_openings_every_disk_admits();
   test_a_disk_parked_open_is_ignored();
   test_a_parked_disk_is_open_only_when_the_beam_is_in_an_opening();
+  test_a_parked_disk_is_open_while_any_of_the_beam_is_on_an_opening();
   test_a_disk_parked_shut_blocks_the_whole_train();
   test_the_envelope_spans_the_outermost_windows();
   test_a_train_that_admits_nothing_reports_nothing();
