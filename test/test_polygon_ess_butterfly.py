@@ -54,8 +54,10 @@ def butterfly(tmp_path_factory):
     binary, target = mccode_compile(instr, work, flavor=Flavor.MCSTAS)
     runs = {}
 
-    def run(**parameters):
+    def run(seed=None, **parameters):
         settings = ' '.join(f'{k}={v}' for k, v in sorted(parameters.items()))
+        if seed is not None:
+            settings = f'--seed {seed} {settings}'
         if settings not in runs:
             directory = work / f'run{len(runs)}'
             _, result = mccode_run_compiled(
@@ -165,3 +167,34 @@ def test_a_path_spread_only_widens_the_region(butterfly):
     spread_low, spread_high = loose['inverse_velocity_bands'][0]
     assert spread_low <= low + 1e-12
     assert spread_high >= high - 1e-12
+
+
+@requires_compiler
+def test_the_region_refuses_nothing_the_discs_pass(butterfly):
+    """Absorbing outside the region loses nothing the discs would have passed.
+
+    McCode seeds every ray on its own, so the same seed draws the same rays with the region
+    on or off: whatever reaches the far monitor without it must reach it with it, ray for
+    ray -- an exact comparison, with no statistics in it.
+    """
+    plain, _ = butterfly(do_region=0, seed=1234)
+    shaped, _ = butterfly(redraw=0, seed=1234)
+    assert _monitor(shaped, 'transmitted')[2] == _monitor(plain, 'transmitted')[2]
+
+
+@requires_compiler
+def test_the_moderator_depth_widens_the_region(butterfly):
+    """The butterfly's surfaces stand ahead of and behind its origin, so a neutron can reach a
+    disc over a shorter or a longer path than the nominal one, and the region allows both.
+
+    Here the discs pass so little of either region that leaving the depth out refuses
+    nothing they pass; on BIFROST it refuses a part in a thousand, early and late at the
+    pulse-shaping edges, and the bifrost-workflow polygon check counts them exactly.
+    """
+    _, deep = butterfly(redraw=0)
+    _, shallow = butterfly(redraw=0, depth=0)
+    deep, shallow = _region(deep), _region(shallow)
+    assert deep['acceptance'] > shallow['acceptance']
+    (deep_low, deep_high), = deep['inverse_velocity_bands']
+    (shallow_low, shallow_high), = shallow['inverse_velocity_bands']
+    assert deep_low < shallow_low and deep_high > shallow_high

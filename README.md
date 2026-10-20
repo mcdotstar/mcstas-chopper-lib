@@ -390,6 +390,16 @@ a mask should ask for 4.1.0.
 #endif
 ```
 
+Version 4.4.0 added the `_depth` forms of `chopper_polygon_set_transmit`,
+`chopper_polygon_set_transmit_train` and `chopper_inverse_velocity_time_mask`, for a source
+that emits over a range of positions along the beam rather than from the point its `path`s
+are measured from. A moderator's surfaces stand a few centimetres ahead of and behind that
+point, so a neutron can reach a disk over a *shorter* path as well as a longer one, which a
+guide's `path_spread` cannot describe. The source's range and the guide's spread are separate
+arguments, since each is known to a different component, and are added inside. Both
+`Polygon_ESS_butterfly` and `Masked_ESS_butterfly` take the range from their own emission
+surfaces (`emission_depth=1`, the default) and so need 4.4.0.
+
 ## License
 
 BSD 3-Clause; see [LICENSE](LICENSE). Every file McCode redistributes carries an

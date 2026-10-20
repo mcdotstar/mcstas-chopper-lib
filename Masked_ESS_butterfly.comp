@@ -25,6 +25,18 @@
 * and is what a mask for anything but a pencil beam needs. Leave it off and the row still
 * compiles, describing the point beam it described before. See the chopper-lib README.
 *
+* <b>A moderator with depth: `emission_depth`</b>
+*
+* ESS_butterfly emits from its moderator surfaces, which reach a few centimetres ahead of
+* and behind the point the discs' `path`s are measured from. A neutron leaving a surface
+* `z` metres downstream of that point reaches a disc after `path - z`, so arrives earlier
+* or later than one from the point itself, and a mask drawn as though every neutron
+* started there refuses some that the discs would pass. The surfaces are this component's
+* own, so `emission_depth = 1`, the default, takes their range from the corners
+* ESS_butterfly places them at and hands it to chopper-lib, which reaches each disc over
+* `[path - z_max, path - z_min]`. `emission_depth = 0` draws the mask as though from
+* the point alone.
+*
 * <b>What the mask is spent on: `resample`</b>
 *
 * By default a ray the mask excludes is ABSORBed. That is correct -- the discs would have
@@ -96,6 +108,8 @@
 * time_bin : [s]                      the width of emission time bins
 * filename: [str]                     the base name of any output files, replaced by NAME_CURRENT_COMP if missing
 * noise_fraction: [1.]                accept out-of-mask rays with this probability
+* emission_depth: [1]                 allow for the depth of the moderator surfaces along the beam (1), or mask
+*                                     as though emitting from the component's origin alone (0)
 * mask_grow: [1]                      expand the chopper-accepted mask by this many bins in each direction
 * use_mask: [1]                       use (1) or do not use (0) the calculated mask for limiting source emission
 * resample: [1]                       draw (1/v, t) directly from the mask, 100% ray emission from source
@@ -125,6 +139,7 @@ SETTING PARAMETERS (
   double time_bin,
   string filename=0,
   noise_fraction=0.0,
+  int emission_depth=1,
   int mask_grow=1,
   int use_mask=1,
   int resample=0,
@@ -146,8 +161,8 @@ OUTPUT PARAMETERS ()
 SHARE INHERIT ESS_butterfly EXTEND %{
   %include "chopper-lib"
 
-#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40100
-#error "Masked_ESS_butterfly describes choppers by edges and resamples with chopper_mask_sampler; chopper-lib 4.1.0 or newer is required"
+#if !defined(CHOPPER_LIB_VERSION) || CHOPPER_LIB_VERSION < 40400
+#error "Masked_ESS_butterfly masks for a moderator with depth; chopper-lib 4.4.0 or newer is required"
 #endif
 %}
 DECLARE INHERIT ESS_butterfly EXTEND %{
@@ -166,6 +181,8 @@ DECLARE INHERIT ESS_butterfly EXTEND %{
   double pulse_period;
   chopper_mask_sampler mask_sampler;
   int save_or_verify_count;
+  double emission_z_min;
+  double emission_z_max;
 %}
 INITIALIZE INHERIT ESS_butterfly EXTEND %{
   // Use the same minimum inverse velocity as in ESS_butterfly, which draws its wavelength
@@ -296,12 +313,47 @@ INITIALIZE INHERIT ESS_butterfly EXTEND %{
     }
   }
 
-  int allowed_bin_count = chopper_inverse_velocity_time_mask(
+  /* Where along the beam the moderator emits from. ESS_butterfly draws each ray from a
+   * point on one of its emission surfaces, segments between the corners below in this
+   * component's frame, so their z coordinates bound how much nearer to or further from a
+   * disc than its `path` a neutron starts. Only the surfaces that can emit count: the cold
+   * ones need cold_frac > 0, the thermal ones cold_frac < 1, and each narrow face a
+   * broad-face fraction below one. The Test Beamline's second cold wing, where a McStas has
+   * one, is the first mirrored across the beam, so it reaches no further along it. */
+  emission_z_min = 0.0;
+  emission_z_max = 0.0;
+  if (emission_depth) {
+    double corner_z[6];
+    int corners = 0;
+    if (cold_frac > 0) {
+      corner_z[corners++] = rC1_z;
+      corner_z[corners++] = rC2_z;
+      if (wfrac_cold < 1) corner_z[corners++] = rC3_z;
+    }
+    if (cold_frac < 1) {
+      corner_z[corners++] = rT1_z;
+      corner_z[corners++] = rT2_z;
+      if (wfrac_thermal < 1) corner_z[corners++] = rT3_z;
+    }
+    emission_z_min = emission_z_max = corner_z[0];
+    for (int ci = 1; ci < corners; ++ci) {
+      if (corner_z[ci] < emission_z_min) emission_z_min = corner_z[ci];
+      if (corner_z[ci] > emission_z_max) emission_z_max = corner_z[ci];
+    }
+    MPI_MASTER(
+      printf("%s: emitting from %g m to %g m along the beam, so each disc is reached over "
+             "[path %+g m, path %+g m]\n", NAME_CURRENT_COMP, emission_z_min,
+             emission_z_max, -emission_z_max, -emission_z_min);
+    );
+  }
+
+  int allowed_bin_count = chopper_inverse_velocity_time_mask_depth(
     mask, inverse_velocity_count, time_count,
     inverse_velocity_edges, inverse_velocity_count + 1,
     time_edges, time_count + 1,
     chop_pars, chopper_count,
-    mask_grow /* grow the region by this many bins in each direction */
+    mask_grow, /* grow the region by this many bins in each direction */
+    emission_z_min, emission_z_max
   );
 
   if (allowed_bin_count < 1){

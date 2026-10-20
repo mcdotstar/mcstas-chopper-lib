@@ -134,6 +134,7 @@
 * spread: [1]        extra flight path available to a ray, as a fraction of each disc's own path
 * do_region: [1]      a flag to allow turning off the source shaping, but not the region calculation
 * redraw: [1]         draw an excluded ray again from inside the region instead of absorbing it
+* depth: [1]          allow for the moderator surfaces' depth along the beam (1), or not (0)
 *
 * %E
 *******************************************************************************/
@@ -158,7 +159,8 @@ DEFINE INSTRUMENT Polygon_ESS_butterfly_image(
   slit_width = 0.1,
   spread = 0.0,
   int do_region = 1,
-  int redraw = 0
+  int redraw = 0,
+  int depth = 1
 )
 
 DECLARE
@@ -254,7 +256,7 @@ COMPONENT source = Polygon_ESS_butterfly(
   acc_power = 2.0, n_pulses = 1,
   choppers = train_as_doubles, chopper_count = 2,
   filename = "source", noise_fraction = noise, use_region = do_region,
-  path_spread_fraction = spread, resample = redraw
+  path_spread_fraction = spread, resample = redraw, emission_depth = depth
 ) AT (0, 0, 0) ABSOLUTE
 EXTEND
 %{
