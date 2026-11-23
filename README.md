@@ -166,6 +166,29 @@ Compiling the file by hand takes the same three definitions:
 cc -c chopper-lib.c -DV2K=1.58825361e-3 -DK2V=629.622368 -DPI=3.14159265358979323846
 ```
 
+## Installing the library
+
+Built on its own, the CMake project installs a shared `chopper_lib`, `chopper-lib.h`
+and a CMake package, so another project can find an installed copy:
+
+```shell
+cmake -S . -B build
+cmake --build build
+cmake --install build --prefix /some/prefix
+```
+
+```cmake
+find_package(chopper_lib 4.4 CONFIG REQUIRED)
+target_link_libraries(its_target PRIVATE chopper_lib::chopper_lib)
+```
+
+The package also sets `CHOPPER_LIB_DEFINITIONS`, the constants the library was built
+with. Pulled in with FetchContent instead, the library is static unless the consumer
+sets `BUILD_SHARED_LIBS`, and installs nothing unless it sets `CHOPPER_LIB_INSTALL`.
+`chopper_lib::chopper_lib` names the target either way, so
+`FetchContent_Declare(... FIND_PACKAGE_ARGS)` can prefer an installed copy and fall
+back to fetching the source.
+
 ## Tests
 
 The C library is tested on its own with CTest:

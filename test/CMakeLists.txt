@@ -10,7 +10,7 @@ foreach (name IN LISTS chopper_lib_tests)
   add_test(NAME ${name} COMMAND ${name})
 endforeach ()
 
-if (WIN32)
+if (WIN32 AND BUILD_SHARED_LIBS)
   # The tests link chopper_lib as a shared library, so it has to be alongside the .exe
   foreach (name IN LISTS chopper_lib_tests)
     add_custom_command(TARGET ${name} POST_BUILD

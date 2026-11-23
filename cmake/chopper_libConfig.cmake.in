@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+# The constants the library was compiled with, for a consumer that converts units the
+# same way it does; the same variable a FetchContent build leaves in the cache.
+set(CHOPPER_LIB_DEFINITIONS "@CHOPPER_LIB_DEFINITIONS@")
+
+include("${CMAKE_CURRENT_LIST_DIR}/chopper_lib_targets.cmake")
+check_required_components(chopper_lib)

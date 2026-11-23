@@ -38,6 +38,9 @@ jobs:
       - name: Test
         run: ctest --test-dir build --build-config Release --output-on-failure
 
+      - name: Install
+        run: cmake --install build --config Release --prefix install
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

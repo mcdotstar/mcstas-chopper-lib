@@ -28,6 +28,12 @@
  *
  * The major version changes when the meaning or layout of a structure changes.
  *
+ * 4.4.2
+ *     Nothing here changes. The CMake project installs the library, this header and a
+ *     package file, so a consumer can `find_package(chopper_lib)` and link
+ *     `chopper_lib::chopper_lib`; built inside another project it is static unless that
+ *     project's `BUILD_SHARED_LIBS` says otherwise.
+ *
  * 4.4.1
  *     A parked disk is open if any of the beam goes through an opening, not only its
  *     centre: `chopper_parked_is_open` reads the disk's `aperture`. It ignored it, so a
@@ -151,7 +157,7 @@
  */
 #define CHOPPER_LIB_VERSION_MAJOR 4
 #define CHOPPER_LIB_VERSION_MINOR 4
-#define CHOPPER_LIB_VERSION_PATCH 1
+#define CHOPPER_LIB_VERSION_PATCH 2
 /** Single integer form, MAJOR*10000 + MINOR*100 + PATCH, for comparison in `#if` */
 #define CHOPPER_LIB_VERSION (CHOPPER_LIB_VERSION_MAJOR * 10000 \
                            + CHOPPER_LIB_VERSION_MINOR * 100 \
